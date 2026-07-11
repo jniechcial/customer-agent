@@ -18,6 +18,15 @@ RECORDS = [
         "retrieved_article_ids": ["A", "B"],
         "tool_calls": [{"query": "x", "article_ids": ["A", "B"]}],
         "agent_model": "gpt-test",
+        "usage": {
+            "requests": 2,
+            "input_tokens": 1000,
+            "cached_input_tokens": 100,
+            "output_tokens": 200,
+            "total_tokens": 1200,
+        },
+        "cost_usd": 0.01,
+        "latency_seconds": 4.0,
     },
     {
         "question": "q2",
@@ -31,6 +40,15 @@ RECORDS = [
             {"query": "w", "article_ids": []},
         ],
         "agent_model": "gpt-test",
+        "usage": {
+            "requests": 4,
+            "input_tokens": 3000,
+            "cached_input_tokens": 500,
+            "output_tokens": 400,
+            "total_tokens": 3400,
+        },
+        "cost_usd": 0.03,
+        "latency_seconds": 10.0,
     },
 ]
 
@@ -81,6 +99,25 @@ def test_summarize_aggregates():
     assert summary["avg_tool_calls"] == pytest.approx(2.0)  # (1 + 3) / 2
     assert summary["metrics"]["recall@5"] == {"mean": 0.5, "n": 2}
     assert summary["metrics"]["map@5"] == {"mean": 0.375, "n": 2}
+    assert summary["usage"] == {
+        "total_input_tokens": 4000,
+        "total_cached_input_tokens": 600,
+        "total_output_tokens": 600,
+        "avg_total_tokens": 2300,
+    }
+    assert summary["cost_usd"] == {"total": pytest.approx(0.04), "avg_per_answer": pytest.approx(0.02)}
+    assert summary["latency_seconds"] == {"avg": 7.0, "max": 10.0}
+
+
+def test_summarize_tolerates_records_without_usage_fields():
+    """Artifacts generated before usage/cost/latency were recorded still summarize."""
+    old_records = [{k: v for k, v in r.items() if k not in {"usage", "cost_usd", "latency_seconds"}}
+                   for r in RECORDS]
+    summary = summarize(Path("runs/x.jsonl"), old_records, {})
+    assert summary["n"] == 2
+    assert summary["usage"] is None
+    assert summary["cost_usd"] is None
+    assert summary["latency_seconds"] is None
 
 
 def test_summarize_empty_records():
@@ -88,3 +125,6 @@ def test_summarize_empty_records():
     assert summary["n"] == 0
     assert summary["avg_tool_calls"] == 0
     assert summary["metrics"] == {}
+    assert summary["usage"] is None
+    assert summary["cost_usd"] is None
+    assert summary["latency_seconds"] is None

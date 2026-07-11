@@ -37,7 +37,13 @@ def _judge_model():
 
         # No temperature: Claude 5 models reject the deprecated param, and deepeval
         # only sends it when explicitly configured.
-        return AnthropicModel(model=settings.judge_model)
+        # Thinking disabled: Claude 5 thinks adaptively by default, and deepeval's
+        # response parsing reads content[0].text, which crashes when a thinking
+        # block precedes the text block.
+        return AnthropicModel(
+            model=settings.judge_model,
+            generation_kwargs={"thinking": {"type": "disabled"}},
+        )
     print(
         "WARNING: ANTHROPIC_API_KEY not set - falling back to deepeval's default "
         "OpenAI judge. Add the key to .env to use the configured Claude judge.",

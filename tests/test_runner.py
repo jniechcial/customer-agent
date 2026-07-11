@@ -3,12 +3,15 @@
 import asyncio
 import json
 
+from types import SimpleNamespace
+
 import pytest
 from datasets import Dataset
 
 import customer_agent.evaluation.runner as runner_module
 from customer_agent.agent.tools import _recorder
 from customer_agent.evaluation.runner import generate_run, load_run, merge_ranked_article_ids
+from customer_agent.pricing import answer_cost_usd
 from customer_agent.retrieval.pipeline import RetrievalResult
 from tests.conftest import make_chunk
 
@@ -25,6 +28,17 @@ def test_merge_empty():
 class FakeRunResult:
     def __init__(self, final_output: str):
         self.final_output = final_output
+        # Mirrors the SDK shape: result.context_wrapper.usage, cached tokens nested
+        # under input_tokens_details.
+        self.context_wrapper = SimpleNamespace(
+            usage=SimpleNamespace(
+                requests=3,
+                input_tokens=1000,
+                input_tokens_details=SimpleNamespace(cached_tokens=200),
+                output_tokens=100,
+                total_tokens=1100,
+            )
+        )
 
 
 @pytest.fixture
@@ -78,6 +92,16 @@ def test_generate_run_writes_complete_artifact(fake_agent_stack, tmp_path):
     assert r0["retrieved_article_ids"] == ["gold0", "noise1", "shared"]
     assert len(r0["tool_calls"]) == 2
     assert r0["tool_calls"][0]["article_ids"] == ["gold0", "noise1"]
+    assert r0["usage"] == {
+        "requests": 3,
+        "input_tokens": 1000,
+        "cached_input_tokens": 200,
+        "output_tokens": 100,
+        "total_tokens": 1100,
+    }
+    # Same computation as the runner's, so exact equality (None if model unpriced).
+    assert r0["cost_usd"] == answer_cost_usd(r0["agent_model"], 1000, 200, 100)
+    assert r0["latency_seconds"] >= 0
 
 
 def test_generate_run_respects_limit(fake_agent_stack):

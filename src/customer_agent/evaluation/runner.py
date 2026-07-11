@@ -18,6 +18,7 @@ from customer_agent.agent.tools import record_retrievals
 from customer_agent.config import get_settings
 from customer_agent.data.splits import get_split
 from customer_agent.evaluation.user_simulator import get_default_simulator
+from customer_agent.pricing import answer_cost_usd
 
 RUNS_DIR = Path("runs")
 
@@ -39,12 +40,16 @@ async def _run_one(agent, simulator, row: dict, index: int, semaphore: asyncio.S
     async with semaphore:
         with record_retrievals() as retrievals:
             message = simulator.first_message(row)
+            start = time.perf_counter()
             result = await Runner.run(agent, message)
+            latency_seconds = time.perf_counter() - start
             # max_turns > 1 + an LLM simulator plugs in here later:
             # loop turns via simulator.next_message(...) feeding result.to_input_list().
         per_call = [
             {"query": r.query, "article_ids": r.ranked_article_ids} for r in retrievals
         ]
+        usage = result.context_wrapper.usage  # aggregated across all LLM requests in the run
+        cached_input_tokens = usage.input_tokens_details.cached_tokens
         return {
             "index": index,
             "question": row["question"],
@@ -56,6 +61,17 @@ async def _run_one(agent, simulator, row: dict, index: int, semaphore: asyncio.S
             ),
             "tool_calls": per_call,
             "agent_model": settings.agent_model,
+            "usage": {
+                "requests": usage.requests,
+                "input_tokens": usage.input_tokens,
+                "cached_input_tokens": cached_input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+            },
+            "cost_usd": answer_cost_usd(
+                settings.agent_model, usage.input_tokens, cached_input_tokens, usage.output_tokens
+            ),
+            "latency_seconds": round(latency_seconds, 3),
         }
 
 

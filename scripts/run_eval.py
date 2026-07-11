@@ -52,6 +52,17 @@ def main() -> None:
 
     print(f"\n=== {artifact.name}: n={summary['n']}, "
           f"avg tool calls={summary['avg_tool_calls']:.2f} ===")
+    if summary["usage"]:
+        u = summary["usage"]
+        print(f"  tokens: in={u['total_input_tokens']:,} "
+              f"(cached {u['total_cached_input_tokens']:,}) "
+              f"out={u['total_output_tokens']:,} avg/question={u['avg_total_tokens']:,.0f}")
+    if summary["cost_usd"]:
+        c = summary["cost_usd"]
+        print(f"  cost: total=${c['total']:.4f} avg/answer=${c['avg_per_answer']:.4f}")
+    if summary["latency_seconds"]:
+        lat = summary["latency_seconds"]
+        print(f"  latency: avg={lat['avg']:.1f}s max={lat['max']:.1f}s")
     for name, stats in summary["metrics"].items():
         print(f"  {name:<24} {stats['mean']:.3f}")
     print(f"summary -> {summary_path}")

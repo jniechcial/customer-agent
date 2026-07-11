@@ -37,6 +37,11 @@ def extract_metric_scores(evaluation_result) -> dict[str, list[float]]:
 
 
 def summarize(artifact: Path, records: list[dict], per_metric: dict[str, list[float]]) -> dict:
+    # .get()-based: artifacts generated before usage/cost/latency were recorded
+    # still summarize (those fields come out None/absent).
+    usages = [r["usage"] for r in records if r.get("usage")]
+    costs = [r["cost_usd"] for r in records if r.get("cost_usd") is not None]
+    latencies = [r["latency_seconds"] for r in records if r.get("latency_seconds") is not None]
     return {
         "artifact": str(artifact),
         "n": len(records),
@@ -44,6 +49,20 @@ def summarize(artifact: Path, records: list[dict], per_metric: dict[str, list[fl
         "avg_tool_calls": (
             statistics.mean(len(r["tool_calls"]) for r in records) if records else 0
         ),
+        "usage": {
+            "total_input_tokens": sum(u["input_tokens"] for u in usages),
+            "total_cached_input_tokens": sum(u["cached_input_tokens"] for u in usages),
+            "total_output_tokens": sum(u["output_tokens"] for u in usages),
+            "avg_total_tokens": statistics.mean(u["total_tokens"] for u in usages),
+        } if usages else None,
+        "cost_usd": {
+            "total": sum(costs),
+            "avg_per_answer": statistics.mean(costs),
+        } if costs else None,
+        "latency_seconds": {
+            "avg": statistics.mean(latencies),
+            "max": max(latencies),
+        } if latencies else None,
         "metrics": {
             name: {"mean": statistics.mean(scores), "n": len(scores)}
             for name, scores in sorted(per_metric.items())
