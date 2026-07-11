@@ -64,7 +64,13 @@ user-simulator stub). Entry points live in `scripts/`; eval artifacts in `runs/`
   `--rescore` without re-paying generation. Scoring: GEval answer correctness vs the
   dataset answer (judge = Claude via deepeval custom model; criteria must tolerate style
   differences — dataset answers are procedural markdown), plus deterministic
-  precision/recall/MRR/MAP@{5,10} at **article level**.
+  precision/recall/MRR/MAP@{5,10} at **article level**. Per-question results (all
+  scores + the judge's reasoning) go to `runs/<run_id>.scores.jsonl` AND to Phoenix as
+  span annotations: each question is wrapped in a `question-<i>` root span whose ids are
+  persisted in the artifact, so scoring (incl. `--rescore`) attaches judge score/label/
+  reasoning to the right trace — browse/sort per conversation in the Phoenix UI. Only
+  per-question-meaningful metrics are annotated (correctness, precision/recall); mrr/map
+  are run-level means and stay in the scores file/summary only.
 - **Synthetic user (stubbed)**: the eval runner drives conversations through a
   `UserSimulator` interface; v1 is single-turn (asks the dataset question, stops). An
   LLM-backed multi-turn simulator later is a config change plus one class.

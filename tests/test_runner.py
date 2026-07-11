@@ -102,6 +102,9 @@ def test_generate_run_writes_complete_artifact(fake_agent_stack, tmp_path):
     # Same computation as the runner's, so exact equality (None if model unpriced).
     assert r0["cost_usd"] == answer_cost_usd(r0["agent_model"], 1000, 200, 100)
     assert r0["latency_seconds"] >= 0
+    # No tracer provider in tests -> ids recorded as null, keys still present.
+    assert r0["otel_trace_id"] is None
+    assert r0["otel_span_id"] is None
 
 
 def test_generate_run_respects_limit(fake_agent_stack):

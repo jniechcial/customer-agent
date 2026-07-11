@@ -2,38 +2,149 @@
 
 Kept separate from the CLI script so the pieces are importable and testable.
 Only score() talks to an LLM (the GEval judge); everything else is pure.
+
+Per-question visibility, two sinks fed from the same extracted results:
+  - runs/<id>.scores.jsonl — every metric score + the judge's reasoning per question
+  - Phoenix span annotations — scores/reasoning attached to each question's trace,
+    browsable and sortable in the Phoenix UI
 """
 
+import json
 import statistics
+import sys
 from pathlib import Path
 
+import httpx
 from deepeval.test_case import LLMTestCase
 
 from customer_agent.config import get_settings
+
+
+def _case_name(record: dict, position: int) -> str:
+    """Stable join key between records, deepeval test cases, and their results."""
+    return f"q{record.get('index', position)}"
 
 
 def build_test_cases(records: list[dict]) -> list[LLMTestCase]:
     """Convention: context = GOLD article ids; retrieval_context = ranked retrieved ids."""
     return [
         LLMTestCase(
+            name=_case_name(r, i),
             input=r["question"],
             actual_output=r["actual_answer"],
             expected_output=r["expected_answer"],
             context=r["gold_article_ids"],
             retrieval_context=r["retrieved_article_ids"],
         )
-        for r in records
+        for i, r in enumerate(records)
     ]
 
 
-def extract_metric_scores(evaluation_result) -> dict[str, list[float]]:
-    """Per-metric score lists out of a deepeval EvaluationResult(-like) object."""
-    per_metric: dict[str, list[float]] = {}
+def extract_case_results(evaluation_result) -> dict[str, dict[str, dict]]:
+    """Case name -> metric name -> {score, success, reason, evaluation_model}.
+
+    Keeps the judge's reasoning (metric reason), unlike a scores-only view.
+    Metrics that errored (score None) are skipped.
+    """
+    case_results: dict[str, dict[str, dict]] = {}
     for test_result in evaluation_result.test_results:
+        metrics: dict[str, dict] = {}
         for metric_data in test_result.metrics_data or []:
             if metric_data.score is not None:
-                per_metric.setdefault(metric_data.name, []).append(metric_data.score)
+                metrics[metric_data.name] = {
+                    "score": metric_data.score,
+                    "success": metric_data.success,
+                    "reason": metric_data.reason,
+                    "evaluation_model": metric_data.evaluation_model,
+                }
+        case_results[test_result.name] = metrics
+    return case_results
+
+
+def per_metric_scores(case_results: dict[str, dict[str, dict]]) -> dict[str, list[float]]:
+    """Pivot case results into per-metric score lists for aggregation."""
+    per_metric: dict[str, list[float]] = {}
+    for metrics in case_results.values():
+        for name, data in metrics.items():
+            per_metric.setdefault(name, []).append(data["score"])
     return per_metric
+
+
+def write_scores(
+    artifact: Path, records: list[dict], case_results: dict[str, dict[str, dict]]
+) -> Path:
+    """Per-question scores JSONL next to the run artifact, judge reasoning included."""
+    path = artifact.with_suffix(".scores.jsonl")
+    with path.open("w") as f:
+        for i, r in enumerate(records):
+            row = {
+                "index": r.get("index", i),
+                "question": r["question"],
+                "otel_trace_id": r.get("otel_trace_id"),
+                "otel_span_id": r.get("otel_span_id"),
+                "metrics": case_results.get(_case_name(r, i), {}),
+            }
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return path
+
+
+# Not annotated on traces: per question these are just reciprocal rank / average
+# precision — they only carry meaning as means over the whole run. They stay in the
+# scores file and the summary.
+_RUN_LEVEL_METRIC_PREFIXES = ("mrr@", "map@")
+
+
+def build_annotations(
+    records: list[dict], case_results: dict[str, dict[str, dict]]
+) -> list[dict]:
+    """Phoenix span-annotation payloads for the per-question-meaningful metrics.
+
+    LLM-judged metrics (those reporting an evaluation model) get annotator_kind LLM,
+    a pass/fail label, and the judge's reasoning as the explanation; deterministic
+    metrics get CODE. Records without a span id (artifacts predating trace-id
+    recording, or untraced runs) are skipped.
+    """
+    annotations = []
+    for i, r in enumerate(records):
+        span_id = r.get("otel_span_id")
+        if not span_id:
+            continue
+        for metric_name, data in case_results.get(_case_name(r, i), {}).items():
+            if metric_name.startswith(_RUN_LEVEL_METRIC_PREFIXES):
+                continue
+            llm_judged = bool(data.get("evaluation_model"))
+            annotations.append(
+                {
+                    "span_id": span_id,
+                    "name": metric_name,
+                    "annotator_kind": "LLM" if llm_judged else "CODE",
+                    "result": {
+                        "score": data["score"],
+                        "label": (
+                            ("pass" if data.get("success") else "fail") if llm_judged else None
+                        ),
+                        "explanation": data.get("reason"),
+                    },
+                }
+            )
+    return annotations
+
+
+def push_annotations(annotations: list[dict], phoenix_endpoint: str) -> int:
+    """POST annotations to Phoenix; span ids are global, so no project is needed.
+
+    Phoenix upserts by (span_id, name), so re-scoring updates annotations in place.
+    """
+    if not annotations:
+        return 0
+    base_url = phoenix_endpoint.split("/v1/")[0]
+    response = httpx.post(
+        f"{base_url}/v1/span_annotations",
+        json={"data": annotations},
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    return len(annotations)
 
 
 def summarize(artifact: Path, records: list[dict], per_metric: dict[str, list[float]]) -> dict:
@@ -71,7 +182,8 @@ def summarize(artifact: Path, records: list[dict], per_metric: dict[str, list[fl
 
 
 def score(artifact: Path) -> dict:
-    """Full scoring pass: deepeval evaluate (judge LLM + deterministic metrics) -> summary."""
+    """Full scoring pass: deepeval evaluate (judge LLM + deterministic metrics) ->
+    per-question scores file + Phoenix annotations + summary."""
     from deepeval import evaluate
 
     from customer_agent.evaluation.answer_metrics import make_correctness_metric
@@ -82,4 +194,17 @@ def score(artifact: Path) -> dict:
     records = load_run(artifact)
     metrics = [make_correctness_metric(), *retrieval_metrics(settings.metric_ks)]
     result = evaluate(test_cases=build_test_cases(records), metrics=metrics)
-    return summarize(artifact, records, extract_metric_scores(result))
+
+    case_results = extract_case_results(result)
+    scores_path = write_scores(artifact, records, case_results)
+    try:
+        pushed = push_annotations(build_annotations(records, case_results),
+                                  settings.phoenix_endpoint)
+    except Exception as exc:  # Phoenix being down must not lose a paid scoring run
+        print(f"WARNING: could not push annotations to Phoenix: {exc}", file=sys.stderr)
+        pushed = 0
+
+    summary = summarize(artifact, records, per_metric_scores(case_results))
+    summary["scores_file"] = str(scores_path)
+    summary["phoenix_annotations"] = pushed
+    return summary

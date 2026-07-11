@@ -66,6 +66,14 @@ def main() -> None:
     for name, stats in summary["metrics"].items():
         print(f"  {name:<24} {stats['mean']:.3f}")
     print(f"summary -> {summary_path}")
+    print(f"per-question scores (judge reasoning) -> {summary['scores_file']}")
+    if summary["phoenix_annotations"]:
+        from customer_agent.config import get_settings
+
+        phoenix_ui = get_settings().phoenix_endpoint.split("/v1/")[0]
+        print(f"{summary['phoenix_annotations']} annotations -> {phoenix_ui} "
+              "(open the run's eval project; sort/filter traces by AnswerCorrectness, "
+              "judge reasoning is in each trace's annotations pane)")
 
 
 if __name__ == "__main__":

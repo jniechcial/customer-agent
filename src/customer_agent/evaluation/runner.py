@@ -3,7 +3,8 @@
 Generation is the expensive part; artifacts in runs/ let us re-score (new judge
 prompt, new K) without re-running the agent. One JSON object per line:
 question, gold answer/articles, agent answer, ranked retrieved article ids,
-per-tool-call transcript.
+per-tool-call transcript, and the question's OTel trace/span ids (for attaching
+score annotations to the Phoenix trace at scoring time).
 """
 
 import asyncio
@@ -12,6 +13,7 @@ import time
 from pathlib import Path
 
 from agents import Runner
+from opentelemetry import trace as otel_trace
 
 from customer_agent.agent.agent import build_agent
 from customer_agent.agent.tools import record_retrievals
@@ -37,14 +39,23 @@ def merge_ranked_article_ids(per_call_rankings: list[list[str]]) -> list[str]:
 
 async def _run_one(agent, simulator, row: dict, index: int, semaphore: asyncio.Semaphore) -> dict:
     settings = get_settings()
+    tracer = otel_trace.get_tracer("customer_agent.evaluation")
     async with semaphore:
-        with record_retrievals() as retrievals:
-            message = simulator.first_message(row)
+        message = simulator.first_message(row)
+        # Explicit per-question root span: the agent's whole trace nests under it, and
+        # its ids are persisted in the artifact so scoring can attach judge annotations
+        # to the right Phoenix trace (also on later --rescore).
+        with record_retrievals() as retrievals, tracer.start_as_current_span(
+            f"question-{index}",
+            attributes={"openinference.span.kind": "CHAIN", "input.value": message},
+        ) as question_span:
             start = time.perf_counter()
             result = await Runner.run(agent, message)
             latency_seconds = time.perf_counter() - start
+            question_span.set_attribute("output.value", str(result.final_output))
             # max_turns > 1 + an LLM simulator plugs in here later:
             # loop turns via simulator.next_message(...) feeding result.to_input_list().
+        span_context = question_span.get_span_context()
         per_call = [
             {"query": r.query, "article_ids": r.ranked_article_ids} for r in retrievals
         ]
@@ -72,6 +83,13 @@ async def _run_one(agent, simulator, row: dict, index: int, semaphore: asyncio.S
                 settings.agent_model, usage.input_tokens, cached_input_tokens, usage.output_tokens
             ),
             "latency_seconds": round(latency_seconds, 3),
+            # Invalid context means tracing wasn't set up (e.g. tests) — record nulls.
+            "otel_trace_id": (
+                format(span_context.trace_id, "032x") if span_context.is_valid else None
+            ),
+            "otel_span_id": (
+                format(span_context.span_id, "016x") if span_context.is_valid else None
+            ),
         }
 
 
