@@ -1,0 +1,8 @@
+.env
+runs/
+__pycache__/
+*.pyc
+.venv/
+.deepeval/
+.deepeval_telemetry.txt
+.ruff_cache/
