@@ -26,35 +26,51 @@ def _case_name(record: dict, position: int) -> str:
 
 
 _NO_GROUNDING_CONTEXT = (
-    "No knowledge-base articles are available for grounding: the agent did not "
-    "retrieve any of the articles the expected answer is based on."
+    "No knowledge-base articles are available for grounding: the agent's searches "
+    "returned nothing (or it never searched), so every specific claim beyond the "
+    "expected answer is unsupported."
 )
 
 
-def _grounding_context(record: dict) -> list[str]:
-    """Texts of the gold articles the agent actually retrieved (gold ∩ retrieved).
+def _seen_article_ids(record: dict) -> list[str]:
+    """Union of the articles the agent's tool output contained, across calls, in
+    call/rank order. Old artifacts predate seen_article_ids; approximate with the
+    top-k_final prefix of each call's full ranking (with chunk-granularity runs
+    that can over-credit slightly — rescores of old runs are indicative only)."""
+    k_final = get_settings().k_final
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for call in record.get("tool_calls") or []:
+        for article_id in call.get("seen_article_ids", call["article_ids"][:k_final]):
+            if article_id not in seen:
+                seen.add(article_id)
+                ordered.append(article_id)
+    return ordered
 
-    Grounding is about what the agent saw: a fact matching a gold article the
-    agent never retrieved is parametric memory getting lucky, not grounding, so
-    that article's text is withheld from the judge. Empty intersection degrades
-    to a sentinel — every claim beyond the expected answer is then ungrounded.
+
+def _grounding_context(record: dict) -> list[str]:
+    """Full texts of every article the agent actually saw in tool output — gold or
+    not. The judge accepts extras only when they are relevant to the question AND
+    supported by these texts; content the agent never saw stays withheld (a fact
+    matching a never-retrieved gold article is parametric memory getting lucky,
+    not grounding). Nothing seen degrades to a sentinel — every claim beyond the
+    expected answer is then ungrounded.
     """
     from customer_agent.data.wixqa import kb_by_article_id
 
     kb = kb_by_article_id()
-    retrieved = set(record["retrieved_article_ids"])
     texts = [
         f"[{kb[article_id]['url']}]\n{kb[article_id]['contents']}"
-        for article_id in record["gold_article_ids"]
-        if article_id in retrieved and article_id in kb
+        for article_id in _seen_article_ids(record)
+        if article_id in kb
     ]
     return texts or [_NO_GROUNDING_CONTEXT]
 
 
 def build_test_cases(records: list[dict]) -> list[LLMTestCase]:
-    """Convention: context = texts of gold∩retrieved articles (judge grounding);
-    retrieval_context = ranked retrieved ids; the gold id list rides in
-    metadata for the deterministic retrieval metrics."""
+    """Convention: context = full texts of the articles the agent saw in tool
+    output (judge grounding); retrieval_context = ranked retrieved ids; the gold
+    id list rides in metadata for the deterministic retrieval metrics."""
     return [
         LLMTestCase(
             name=_case_name(r, i),

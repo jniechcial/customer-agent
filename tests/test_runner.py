@@ -9,6 +9,7 @@ import pytest
 from datasets import Dataset
 
 import customer_agent.evaluation.runner as runner_module
+from customer_agent.agent.prompts import PROMPT_VERSION
 from customer_agent.agent.tools import _recorder
 from customer_agent.evaluation.runner import generate_run, load_run, merge_ranked_article_ids
 from customer_agent.pricing import answer_cost_usd
@@ -65,10 +66,14 @@ def fake_agent_stack(monkeypatch, tmp_path):
         # partially overlapping the first — from a child task like the SDK does.
         async def tool_call(article_ids):
             recorded = _recorder.get()
+            chunks = [make_chunk(a) for a in article_ids]
             recorded.append(
                 RetrievalResult(
                     query=f"search for {message}",
-                    ranked_chunks=[make_chunk(a) for a in article_ids],
+                    ranked_chunks=chunks,
+                    # Real pipeline slices top k_final; the fake shows all but the last,
+                    # so seen_article_ids provably differs from the full ranking.
+                    tool_chunks=chunks[:-1],
                 )
             )
 
@@ -98,6 +103,9 @@ def test_generate_run_writes_complete_artifact(fake_agent_stack, tmp_path):
     assert r0["retrieved_article_ids"] == ["gold0", "noise1", "shared"]
     assert len(r0["tool_calls"]) == 2
     assert r0["tool_calls"][0]["article_ids"] == ["gold0", "noise1"]
+    # Judge grounding sees only the tool-output slice, not the full ranking.
+    assert r0["tool_calls"][0]["seen_article_ids"] == ["gold0"]
+    assert r0["tool_calls"][1]["seen_article_ids"] == ["noise1"]
     assert r0["usage"] == {
         "requests": 3,
         "input_tokens": 1000,
@@ -107,6 +115,8 @@ def test_generate_run_writes_complete_artifact(fake_agent_stack, tmp_path):
     }
     # Config identity recorded so runs stay comparable across knob changes.
     assert r0["max_searches"] == 2
+    assert r0["prompt_version"] == PROMPT_VERSION
+    assert r0["tool_output_granularity"] in ("chunks", "articles")
     # Same computation as the runner's, so exact equality (None if model unpriced).
     assert r0["cost_usd"] == answer_cost_usd(r0["agent_model"], 1000, 200, 100)
     assert r0["latency_seconds"] >= 0

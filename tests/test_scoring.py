@@ -21,7 +21,9 @@ RECORDS = [
         "expected_answer": "e1",
         "gold_article_ids": ["A"],
         "retrieved_article_ids": ["A", "B"],
-        "tool_calls": [{"query": "x", "article_ids": ["A", "B"]}],
+        "tool_calls": [
+            {"query": "x", "article_ids": ["A", "B"], "seen_article_ids": ["A", "B"]}
+        ],
         "agent_model": "gpt-test",
         "usage": {
             "requests": 2,
@@ -62,13 +64,16 @@ RECORDS = [
 ]
 
 
+KB = {
+    "A": {"url": "u/A", "contents": "BODY A"},
+    "B": {"url": "u/B", "contents": "BODY B"},
+    "C": {"url": "u/C", "contents": "BODY C"},
+    "D": {"url": "u/D", "contents": "BODY D"},
+}
+
+
 def test_build_test_cases_maps_fields(monkeypatch):
-    kb = {
-        "A": {"url": "u/A", "contents": "BODY A"},
-        "C": {"url": "u/C", "contents": "BODY C"},
-        "D": {"url": "u/D", "contents": "BODY D"},
-    }
-    monkeypatch.setattr("customer_agent.data.wixqa.kb_by_article_id", lambda: kb)
+    monkeypatch.setattr("customer_agent.data.wixqa.kb_by_article_id", lambda: KB)
 
     cases = build_test_cases(RECORDS)
     assert len(cases) == 2
@@ -77,12 +82,33 @@ def test_build_test_cases_maps_fields(monkeypatch):
     assert tc.input == "q1"
     assert tc.actual_output == "a1"
     assert tc.expected_output == "e1"
-    assert tc.context == ["[u/A]\nBODY A"]     # judge grounding: gold ∩ retrieved texts
+    # Judge grounding: every article the agent saw in tool output, gold ("A") and
+    # non-gold ("B") alike — extras relayed from B must be verifiable.
+    assert tc.context == ["[u/A]\nBODY A", "[u/B]\nBODY B"]
     assert tc.retrieval_context == ["A", "B"]  # ranked retrieved ids
     assert tc.metadata == {"gold_article_ids": ["A"]}
     # Record 1 retrieved nothing: grounding degrades to the sentinel, not gold texts.
     assert cases[1].context is not None
     assert "No knowledge-base articles" in cases[1].context[0]
+
+
+def test_build_test_cases_old_artifact_falls_back_to_k_final_prefix(monkeypatch):
+    """Artifacts predating seen_article_ids approximate the seen set with the
+    top-k_final prefix of each call's full ranking."""
+    monkeypatch.setattr("customer_agent.data.wixqa.kb_by_article_id", lambda: KB)
+    monkeypatch.setattr(
+        "customer_agent.evaluation.scoring.get_settings",
+        lambda: SimpleNamespace(k_final=2),
+    )
+    record = dict(
+        RECORDS[0],
+        tool_calls=[
+            {"query": "x", "article_ids": ["A", "B", "C"]},  # C is below the cutoff
+            {"query": "y", "article_ids": ["B", "D"]},
+        ],
+    )
+    (tc,) = build_test_cases([record])
+    assert tc.context == ["[u/A]\nBODY A", "[u/B]\nBODY B", "[u/D]\nBODY D"]
 
 
 def fake_result(metrics_per_test: dict[str, list[dict]]):

@@ -41,6 +41,17 @@ def test_ranked_article_ids_dedupe_to_first_occurrence():
     assert result.ranked_article_ids == ["A", "B", "C"]
 
 
+def test_seen_article_ids_cover_only_the_tool_output_slice():
+    # "C" is ranked but below the tool cutoff: the agent never saw it, so it must
+    # not appear in seen_article_ids (judge grounding consumes this).
+    result = RetrievalResult(
+        query="q",
+        ranked_chunks=[make_chunk("A", 0), make_chunk("B", 0), make_chunk("A", 1), make_chunk("C", 0)],
+        tool_chunks=[make_chunk("A", 0), make_chunk("B", 0), make_chunk("A", 1)],
+    )
+    assert result.seen_article_ids == ["A", "B"]
+
+
 def test_search_keeps_full_ranking_and_slices_tool_chunks(monkeypatch):
     candidates = [make_chunk(f"art{i}", score=1 - i / 10) for i in range(8)]
     pipeline = build_pipeline(candidates, k_retrieve=8, k_final=3, monkeypatch=monkeypatch)
@@ -56,7 +67,8 @@ def test_search_keeps_full_ranking_and_slices_tool_chunks(monkeypatch):
 
 
 def test_format_chunks_includes_title_url_and_text(monkeypatch):
-    pipeline = build_pipeline([], monkeypatch=monkeypatch)
+    settings = Settings(tool_output_granularity="chunks")
+    pipeline = build_pipeline([], monkeypatch=monkeypatch, settings=settings)
     result = RetrievalResult(query="q", ranked_chunks=[], tool_chunks=[make_chunk("A", 2)])
     output = pipeline.format_for_agent(result)
     assert "Article A" in output       # title

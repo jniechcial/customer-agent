@@ -23,9 +23,20 @@ class RetrievalResult:
     @property
     def ranked_article_ids(self) -> list[str]:
         """Article-level ranking: chunks deduped to first occurrence. Eval consumes this."""
+        return self._dedupe_articles(self.ranked_chunks)
+
+    @property
+    def seen_article_ids(self) -> list[str]:
+        """Articles the agent actually saw: the tool-output slice, deduped in rank
+        order. Judge grounding consumes this — unlike ranked_article_ids, which
+        includes candidates ranked below the tool cutoff."""
+        return self._dedupe_articles(self.tool_chunks)
+
+    @staticmethod
+    def _dedupe_articles(chunks: list[RetrievedChunk]) -> list[str]:
         seen: set[str] = set()
         ordered: list[str] = []
-        for chunk in self.ranked_chunks:
+        for chunk in chunks:
             if chunk.article_id not in seen:
                 seen.add(chunk.article_id)
                 ordered.append(chunk.article_id)
@@ -58,9 +69,7 @@ class RetrievalPipeline:
         blocks: list[str] = []
         if settings.tool_output_granularity == "articles":
             kb = kb_by_article_id()
-            for article_id in RetrievalResult(
-                query=result.query, ranked_chunks=result.tool_chunks
-            ).ranked_article_ids:
+            for article_id in result.seen_article_ids:
                 row = kb[article_id]
                 blocks.append(
                     f"[{row['title']}] ({row['article_type']})\n"

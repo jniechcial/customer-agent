@@ -40,8 +40,11 @@ class Settings(BaseSettings):
     hybrid_alpha: float = 0.5  # hybrid fusion weight: 1.0 = pure vector, 0.0 = pure BM25
     reranker: Literal["identity", "voyage"] = "voyage"
     rerank_model: str = "rerank-2.5"
-    # What the tool hands to the agent: raw chunks or the full articles the hits belong to.
-    tool_output_granularity: Literal["chunks", "articles"] = "chunks"
+    # What the tool hands to the agent: raw chunks or the full articles the hits
+    # belong to. Default is full articles: the expected answers (and the judge's
+    # completeness bar) are written from whole articles, and 512-token chunks were
+    # the dominant cause of "missing essential steps" failures on chunk runs.
+    tool_output_granularity: Literal["chunks", "articles"] = "articles"
     # Hard cap on search_knowledge_base calls per question (eval) / user turn (chat);
     # calls beyond it skip retrieval and return an error to the model.
     max_searches: int = 2

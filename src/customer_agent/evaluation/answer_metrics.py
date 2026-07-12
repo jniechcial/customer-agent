@@ -10,12 +10,16 @@ Design decisions, from eyeballing judge outputs on ~10 baseline examples:
   filtered and eyeballed separately (in Phoenix or the scores file) without
   polluting the correctness rate.
 - Grounding is checked against sources, not against the reference's silence.
-  The judge receives (as test-case context) the full text of the gold articles
-  the agent actually retrieved — gold ∩ retrieved, built in scoring.py. Extras
-  beyond the expected answer are fine when supported by those articles; specific
-  claims found in neither the expected answer nor the articles are hallucinations
-  and make the answer incorrect. Gold articles the agent never retrieved are
-  deliberately withheld: matching them is parametric memory, not grounding.
+  The judge receives (as test-case context) the full text of every article the
+  agent actually saw in tool output — gold or not, built in scoring.py. Extras
+  beyond the expected answer are fine only when BOTH relevant to the user's
+  question AND supported by those articles; extras failing either test (off-topic
+  padding, or claims found in neither the expected answer nor the articles) make
+  the answer incorrect. Articles the agent never saw are deliberately withheld:
+  matching them is parametric memory, not grounding. (Judge v2 — earlier runs
+  were scored with gold∩retrieved grounding, which punished faithful relay of
+  non-gold retrieved articles; correctness numbers across the two conventions
+  are not comparable.)
 - Judge reasoning explains failures only: correct answers are accepted silently,
   with no callouts of what is right.
 - Together the two metrics read: correctness=1 → correct; correctness=0 with
@@ -38,8 +42,9 @@ from customer_agent.config import get_settings
 CORRECTNESS_CRITERIA = """\
 Judge whether the actual output gives the user the full resolution of the expected
 answer. The expected answer is the ground truth written by a support expert. The
-context contains the knowledge-base articles the expected answer is based on (when
-available) — the only legitimate sources for claims that go beyond the expected
+context contains the knowledge-base documentation the agent retrieved and read
+while answering — it may include articles beyond those the expected answer is
+based on. It is the only legitimate source for claims that go beyond the expected
 answer.
 
 The verdict is binary: fully correct, or not. A partially correct or incomplete
@@ -52,41 +57,49 @@ The actual output is correct only if ALL of the following hold:
 - It does not contradict the expected answer or the context articles. If the
   expected answer says something is impossible or unsupported, the actual output
   must not claim it is possible.
-- Every specific factual claim that goes beyond the expected answer — a numeric
-  limit, price, plan or feature availability, setting or feature name, extra step
-  or method — is supported by the context articles. Extras supported by the
-  context articles are NOT a fault, however much they add. A specific claim found
-  in neither the expected answer nor the context articles makes the answer
-  incorrect.
+- Every piece of information that goes beyond the expected answer — a fact, step,
+  method, limit, requirement, caveat, or alternative — passes BOTH tests:
+  1. Relevance: it helps answer the user's actual question. Accurate material on
+     a different task or a tangent the user did not ask about fails this test.
+  2. Grounding: it is supported by the context articles. A specific claim (numeric
+     limit, price, plan or feature availability, setting or feature name, step or
+     click-path) found in neither the expected answer nor the context articles
+     fails this test.
+  Extras passing both tests are NOT a fault, however much they add — do not
+  penalize an answer for being more complete than the expected answer when the
+  additions are relevant and supported. An extra failing either test makes the
+  answer incorrect.
 
 Reasoning: never call out what the answer gets right. If the answer is correct,
 say only "correct". If it is incorrect, state briefly and only what is wrong:
-the contradiction, the missing essential step(s), or the ungrounded fact(s).
+the contradiction, the missing essential step(s), the irrelevant extra(s), or
+the ungrounded fact(s).
 """
 
 PARTIAL_CRITERIA = """\
 Flag whether the actual output is ON THE RIGHT TRACK relative to the expected
 answer (the ground truth written by a support expert) without being fully
-correct. The context contains the knowledge-base articles the expected answer
-is based on (when available).
+correct. The context contains the knowledge-base documentation the agent
+retrieved and read while answering.
 
 Score 1 when the answer addresses the user's actual problem and does not
 contradict the expected answer or the context articles, but falls short of
-fully correct in either or both of these ways:
-- it covers some but not all key facts or essential steps of the expected
-  answer, or
-- it covers all essentials but states specific factual claims (numeric limits,
-  prices, feature availability, setting or feature names) found in neither the
-  expected answer nor the context articles.
+fully correct. The primary case is that something is MISSING: it covers some
+but not all key facts or essential steps of the expected answer — typically
+because the expected answer draws on documentation that is absent from the
+context (the agent never retrieved it), or because the answer was shortened
+too much and skipped steps the expected answer spells out. Also score 1 when
+all essentials are covered but the answer adds material that is irrelevant to
+the user's question or unsupported by the expected answer and context articles.
 
 Score 0 in both other cases:
-- fully correct: every essential is covered and every extra specific claim is
-  supported by the expected answer or the context articles; or
+- fully correct: every essential is covered and every addition is relevant to
+  the question and supported by the expected answer or the context articles; or
 - wrong: it contradicts the expected answer, addresses a different problem or
   procedure, or its content is predominantly unsupported.
 
-Reasoning: one short sentence — what is missing or unsupported (if on the right
-track), or why the answer is not flagged (fully correct / wrong).
+Reasoning: one short sentence — what is missing, irrelevant, or unsupported (if
+on the right track), or why the answer is not flagged (fully correct / wrong).
 """
 
 

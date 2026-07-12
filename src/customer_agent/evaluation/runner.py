@@ -16,6 +16,7 @@ from agents import Runner
 from opentelemetry import trace as otel_trace
 
 from customer_agent.agent.agent import build_agent
+from customer_agent.agent.prompts import PROMPT_VERSION
 from customer_agent.agent.tools import record_retrievals, search_budget
 from customer_agent.config import get_settings
 from customer_agent.data.splits import get_split
@@ -95,8 +96,16 @@ async def _run_agent(agent, tracer, settings, message: str, row: dict, index: in
         # max_turns > 1 + an LLM simulator plugs in here later:
         # loop turns via simulator.next_message(...) feeding result.to_input_list().
     span_context = question_span.get_span_context()
+    # article_ids: full post-rerank ranking (retrieval metrics measure the pipeline).
+    # seen_article_ids: only what the tool output contained — judge grounding must
+    # not credit content the agent never saw.
     per_call = [
-        {"query": r.query, "article_ids": r.ranked_article_ids} for r in retrievals
+        {
+            "query": r.query,
+            "article_ids": r.ranked_article_ids,
+            "seen_article_ids": r.seen_article_ids,
+        }
+        for r in retrievals
     ]
     usage = result.context_wrapper.usage  # aggregated across all LLM requests in the run
     cached_input_tokens = usage.input_tokens_details.cached_tokens
@@ -111,8 +120,10 @@ async def _run_agent(agent, tracer, settings, message: str, row: dict, index: in
         ),
         "tool_calls": per_call,
         "agent_model": settings.agent_model,
+        "prompt_version": PROMPT_VERSION,
         "reranker": settings.reranker_id,
         "search_mode": settings.search_mode_id,
+        "tool_output_granularity": settings.tool_output_granularity,
         "max_searches": settings.max_searches,
         "usage": {
             "requests": usage.requests,
