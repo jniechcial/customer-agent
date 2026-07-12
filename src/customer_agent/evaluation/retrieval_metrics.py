@@ -1,8 +1,10 @@
 """Deterministic retrieval metrics as deepeval custom metrics (no LLM involved).
 
-Convention: LLMTestCase.context holds the GOLD article ids, and
-LLMTestCase.retrieval_context holds the RETRIEVED article ids in rank order
-(article-level, deduped to first occurrence, merged across tool calls).
+Convention: LLMTestCase.additional_metadata["gold_article_ids"] holds the GOLD
+article ids, and LLMTestCase.retrieval_context holds the RETRIEVED article ids
+in rank order (article-level, deduped to first occurrence, merged across tool
+calls). LLMTestCase.context belongs to the LLM judge (gold article texts), not
+to these metrics.
 """
 
 from deepeval.metrics import BaseMetric
@@ -26,7 +28,7 @@ class _RankedRetrievalMetric(BaseMetric):
         raise NotImplementedError
 
     def measure(self, test_case: LLMTestCase, *args, **kwargs) -> float:
-        gold = set(test_case.context or [])
+        gold = set((test_case.additional_metadata or {}).get("gold_article_ids", []))
         retrieved = list(test_case.retrieval_context or [])
         self.score = self._compute(gold, retrieved) if gold else 0.0
         self.success = self.score >= self.threshold

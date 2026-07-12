@@ -25,16 +25,45 @@ def _case_name(record: dict, position: int) -> str:
     return f"q{record.get('index', position)}"
 
 
+_NO_GROUNDING_CONTEXT = (
+    "No knowledge-base articles are available for grounding: the agent did not "
+    "retrieve any of the articles the expected answer is based on."
+)
+
+
+def _grounding_context(record: dict) -> list[str]:
+    """Texts of the gold articles the agent actually retrieved (gold ∩ retrieved).
+
+    Grounding is about what the agent saw: a fact matching a gold article the
+    agent never retrieved is parametric memory getting lucky, not grounding, so
+    that article's text is withheld from the judge. Empty intersection degrades
+    to a sentinel — every claim beyond the expected answer is then ungrounded.
+    """
+    from customer_agent.data.wixqa import kb_by_article_id
+
+    kb = kb_by_article_id()
+    retrieved = set(record["retrieved_article_ids"])
+    texts = [
+        f"[{kb[article_id]['url']}]\n{kb[article_id]['contents']}"
+        for article_id in record["gold_article_ids"]
+        if article_id in retrieved and article_id in kb
+    ]
+    return texts or [_NO_GROUNDING_CONTEXT]
+
+
 def build_test_cases(records: list[dict]) -> list[LLMTestCase]:
-    """Convention: context = GOLD article ids; retrieval_context = ranked retrieved ids."""
+    """Convention: context = texts of gold∩retrieved articles (judge grounding);
+    retrieval_context = ranked retrieved ids; gold/retrieved id lists ride in
+    additional_metadata for the deterministic retrieval metrics."""
     return [
         LLMTestCase(
             name=_case_name(r, i),
             input=r["question"],
             actual_output=r["actual_answer"],
             expected_output=r["expected_answer"],
-            context=r["gold_article_ids"],
+            context=_grounding_context(r),
             retrieval_context=r["retrieved_article_ids"],
+            additional_metadata={"gold_article_ids": r["gold_article_ids"]},
         )
         for i, r in enumerate(records)
     ]

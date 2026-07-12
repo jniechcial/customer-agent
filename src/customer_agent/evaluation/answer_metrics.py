@@ -9,12 +9,18 @@ Design decisions, from eyeballing judge outputs on ~10 baseline examples:
   answers that are not fully correct but not completely wrong, so they can be
   filtered and eyeballed separately (in Phoenix or the scores file) without
   polluting the correctness rate.
-- Grounding is asymmetric. Stylistic freedom is fine — different ordering, level
-  of detail, creative phrasing, extra generic guidance. But concrete factual
-  claims not grounded in the expected answer (limits, prices, feature
-  availability) make the answer incorrect even when everything else matches.
+- Grounding is checked against sources, not against the reference's silence.
+  The judge receives (as test-case context) the full text of the gold articles
+  the agent actually retrieved — gold ∩ retrieved, built in scoring.py. Extras
+  beyond the expected answer are fine when supported by those articles; specific
+  claims found in neither the expected answer nor the articles are hallucinations
+  and make the answer incorrect. Gold articles the agent never retrieved are
+  deliberately withheld: matching them is parametric memory, not grounding.
 - Judge reasoning explains failures only: correct answers are accepted silently,
   with no callouts of what is right.
+- Together the two metrics read: correctness=1 → correct; correctness=0 with
+  partial=1 → on the right track; 0/0 → wrong (contradiction, different problem,
+  or predominantly ungrounded).
 
 Known validity risk: dataset answers are step-by-step markdown procedures while
 the agent answers conversationally — the criteria below deliberately target
@@ -31,7 +37,11 @@ from customer_agent.config import get_settings
 
 CORRECTNESS_CRITERIA = """\
 Judge whether the actual output gives the user the full resolution of the expected
-answer. The expected answer is the ground truth written by a support expert.
+answer. The expected answer is the ground truth written by a support expert. The
+context contains the knowledge-base articles the expected answer is based on (when
+available) — the only legitimate sources for claims that go beyond the expected
+answer.
+
 The verdict is binary: fully correct, or not. A partially correct or incomplete
 answer is NOT correct.
 
@@ -39,15 +49,15 @@ The actual output is correct only if ALL of the following hold:
 - It contains every key fact and every essential step of the expected answer.
   Wording, ordering, formatting, and level of detail are free to differ;
   conversational tone vs. procedural markdown does not matter.
-- It does not contradict the expected answer. If the expected answer says
-  something is impossible or unsupported, the actual output must not claim it
-  is possible.
-- It states no ungrounded specific facts: any concrete factual claim that is not
-  supported by the expected answer — numeric limits, prices, plan or feature
-  availability, names of settings or features — makes the answer incorrect,
-  even if the rest matches. Extra guidance that is merely more creative, more
-  detailed, or differently ordered than the expected answer is not a fault;
-  only unsupported specific factual claims are.
+- It does not contradict the expected answer or the context articles. If the
+  expected answer says something is impossible or unsupported, the actual output
+  must not claim it is possible.
+- Every specific factual claim that goes beyond the expected answer — a numeric
+  limit, price, plan or feature availability, setting or feature name, extra step
+  or method — is supported by the context articles. Extras supported by the
+  context articles are NOT a fault, however much they add. A specific claim found
+  in neither the expected answer nor the context articles makes the answer
+  incorrect.
 
 Reasoning: never call out what the answer gets right. If the answer is correct,
 say only "correct". If it is incorrect, state briefly and only what is wrong:
@@ -55,22 +65,28 @@ the contradiction, the missing essential step(s), or the ungrounded fact(s).
 """
 
 PARTIAL_CRITERIA = """\
-Flag whether the actual output is a PARTIALLY correct answer relative to the
-expected answer (the ground truth written by a support expert).
+Flag whether the actual output is ON THE RIGHT TRACK relative to the expected
+answer (the ground truth written by a support expert) without being fully
+correct. The context contains the knowledge-base articles the expected answer
+is based on (when available).
 
-Score 1 only when the answer is partially correct or incomplete: it covers some
-key facts or essential steps of the expected answer, or points the user in the
-right direction, but omits other essentials or stops short of the full
-resolution — while NOT contradicting the expected answer and NOT stating
-specific facts (numeric limits, prices, feature availability) that the expected
-answer does not support.
+Score 1 when the answer addresses the user's actual problem and does not
+contradict the expected answer or the context articles, but falls short of
+fully correct in either or both of these ways:
+- it covers some but not all key facts or essential steps of the expected
+  answer, or
+- it covers all essentials but states specific factual claims (numeric limits,
+  prices, feature availability, setting or feature names) found in neither the
+  expected answer nor the context articles.
 
-Score 0 in both other cases: the answer is fully correct (nothing essential
-missing), or the answer is wrong (contradicts the expected answer, states
-ungrounded specific facts, or addresses a different problem).
+Score 0 in both other cases:
+- fully correct: every essential is covered and every extra specific claim is
+  supported by the expected answer or the context articles; or
+- wrong: it contradicts the expected answer, addresses a different problem or
+  procedure, or its content is predominantly unsupported.
 
-Reasoning: one short sentence — what essential part is missing (if partial), or
-why the answer is not partial (fully correct / wrong).
+Reasoning: one short sentence — what is missing or unsupported (if on the right
+track), or why the answer is not flagged (fully correct / wrong).
 """
 
 
@@ -100,6 +116,7 @@ _EVALUATION_PARAMS = [
     LLMTestCaseParams.INPUT,
     LLMTestCaseParams.ACTUAL_OUTPUT,
     LLMTestCaseParams.EXPECTED_OUTPUT,
+    LLMTestCaseParams.CONTEXT,
 ]
 
 
