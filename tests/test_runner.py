@@ -16,7 +16,13 @@ from customer_agent.retrieval.pipeline import RetrievalResult
 from tests.conftest import make_chunk
 
 
-def test_merge_preserves_call_order_and_dedupes():
+def test_merge_orders_by_best_rank_across_calls():
+    # "G" is rank 1 of the second call: it outranks the first call's lower ranks
+    # instead of queueing behind that call's whole ranking (the old v1 concat rule).
+    assert merge_ranked_article_ids([["X", "Y", "Z"], ["G", "Y"]]) == ["X", "G", "Y", "Z"]
+
+
+def test_merge_breaks_rank_ties_by_call_order_and_dedupes():
     assert merge_ranked_article_ids([["A", "B"], ["B", "C"], ["A", "D"]]) == ["A", "B", "C", "D"]
 
 

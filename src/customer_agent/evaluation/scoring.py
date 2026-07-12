@@ -53,8 +53,8 @@ def _grounding_context(record: dict) -> list[str]:
 
 def build_test_cases(records: list[dict]) -> list[LLMTestCase]:
     """Convention: context = texts of gold∩retrieved articles (judge grounding);
-    retrieval_context = ranked retrieved ids; gold/retrieved id lists ride in
-    additional_metadata for the deterministic retrieval metrics."""
+    retrieval_context = ranked retrieved ids; the gold id list rides in
+    metadata for the deterministic retrieval metrics."""
     return [
         LLMTestCase(
             name=_case_name(r, i),
@@ -63,7 +63,7 @@ def build_test_cases(records: list[dict]) -> list[LLMTestCase]:
             expected_output=r["expected_answer"],
             context=_grounding_context(r),
             retrieval_context=r["retrieved_article_ids"],
-            additional_metadata={"gold_article_ids": r["gold_article_ids"]},
+            metadata={"gold_article_ids": r["gold_article_ids"]},
         )
         for i, r in enumerate(records)
     ]
@@ -227,8 +227,18 @@ def score(artifact: Path) -> dict:
     from customer_agent.evaluation.retrieval_metrics import retrieval_metrics
     from customer_agent.evaluation.runner import load_run
 
+    from customer_agent.evaluation.runner import merge_ranked_article_ids
+
     settings = get_settings()
     records = load_run(artifact)
+    # The merge rule is a scoring-time decision: recompute the article ranking from
+    # the per-call rankings so --rescore applies the current rule to old artifacts
+    # (the persisted retrieved_article_ids reflect whichever rule generation used).
+    for r in records:
+        if r.get("tool_calls"):
+            r["retrieved_article_ids"] = merge_ranked_article_ids(
+                [c["article_ids"] for c in r["tool_calls"]]
+            )
     failed = [r for r in records if r.get("error")]
     if failed:
         print(

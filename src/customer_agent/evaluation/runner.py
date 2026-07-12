@@ -27,14 +27,20 @@ RUNS_DIR = Path("runs")
 
 
 def merge_ranked_article_ids(per_call_rankings: list[list[str]]) -> list[str]:
-    """Concatenate per-call article rankings in call order, dedupe to first occurrence."""
+    """Merge per-call article rankings by best rank across calls (v2 rule).
+
+    Round-robin over rank positions, calls in order: articles sort by the best
+    rank they achieved in any call, ties broken by call order. The v1 rule
+    (concatenate calls, dedupe) buried a rank-1 hit from a later search behind
+    the entire ranking of the first, penalizing agents that search more.
+    """
     seen: set[str] = set()
     merged: list[str] = []
-    for ranking in per_call_rankings:
-        for article_id in ranking:
-            if article_id not in seen:
-                seen.add(article_id)
-                merged.append(article_id)
+    for position in range(max((len(r) for r in per_call_rankings), default=0)):
+        for ranking in per_call_rankings:
+            if position < len(ranking) and ranking[position] not in seen:
+                seen.add(ranking[position])
+                merged.append(ranking[position])
     return merged
 
 
@@ -106,6 +112,7 @@ async def _run_agent(agent, tracer, settings, message: str, row: dict, index: in
         "tool_calls": per_call,
         "agent_model": settings.agent_model,
         "reranker": settings.reranker_id,
+        "search_mode": settings.search_mode_id,
         "usage": {
             "requests": usage.requests,
             "input_tokens": usage.input_tokens,
