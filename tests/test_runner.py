@@ -105,6 +105,8 @@ def test_generate_run_writes_complete_artifact(fake_agent_stack, tmp_path):
         "output_tokens": 100,
         "total_tokens": 1100,
     }
+    # Config identity recorded so runs stay comparable across knob changes.
+    assert r0["max_searches"] == 2
     # Same computation as the runner's, so exact equality (None if model unpriced).
     assert r0["cost_usd"] == answer_cost_usd(r0["agent_model"], 1000, 200, 100)
     assert r0["latency_seconds"] >= 0

@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     rerank_model: str = "rerank-2.5"
     # What the tool hands to the agent: raw chunks or the full articles the hits belong to.
     tool_output_granularity: Literal["chunks", "articles"] = "chunks"
+    # Hard cap on search_knowledge_base calls per question (eval) / user turn (chat);
+    # calls beyond it skip retrieval and return an error to the model.
+    max_searches: int = 2
 
     # --- Infra ---
     weaviate_http_host: str = "localhost"

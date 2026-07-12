@@ -16,7 +16,7 @@ from agents import Runner
 from opentelemetry import trace as otel_trace
 
 from customer_agent.agent.agent import build_agent
-from customer_agent.agent.tools import record_retrievals
+from customer_agent.agent.tools import record_retrievals, search_budget
 from customer_agent.config import get_settings
 from customer_agent.data.splits import get_split
 from customer_agent.evaluation.user_simulator import get_default_simulator
@@ -84,7 +84,7 @@ async def _run_agent(agent, tracer, settings, message: str, row: dict, index: in
     # Explicit per-question root span: the agent's whole trace nests under it, and
     # its ids are persisted in the artifact so scoring can attach judge annotations
     # to the right Phoenix trace (also on later --rescore).
-    with record_retrievals() as retrievals, tracer.start_as_current_span(
+    with record_retrievals() as retrievals, search_budget(), tracer.start_as_current_span(
         f"question-{index}",
         attributes={"openinference.span.kind": "CHAIN", "input.value": message},
     ) as question_span:
@@ -113,6 +113,7 @@ async def _run_agent(agent, tracer, settings, message: str, row: dict, index: in
         "agent_model": settings.agent_model,
         "reranker": settings.reranker_id,
         "search_mode": settings.search_mode_id,
+        "max_searches": settings.max_searches,
         "usage": {
             "requests": usage.requests,
             "input_tokens": usage.input_tokens,

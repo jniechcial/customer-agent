@@ -71,7 +71,15 @@ user-simulator stub). Entry points live in `scripts/`; eval artifacts in `runs/`
   penalized agents for searching more; switching to v2 alone moved v2b recall@5
   0.793→0.823.) The merge is recomputed from per-call rankings at scoring time, so
   `--rescore` applies the current rule to old artifacts.
-- **Agent**: one Agent, one tool; the model decides when/how often to search.
+- **Agent**: one Agent, one tool; the model decides when/how often to search, capped
+  at `max_searches` (2, config knob) calls per question (eval) / user turn (chat) — a
+  UX decision (too many tool calls). Enforced twice: the prompt (V3 = V2B + search
+  budget) tells the model, and the tool deterministically returns a "search budget
+  exhausted" error on calls beyond the cap (no retrieval runs, nothing recorded, the
+  agent loop survives and must answer). The budget is a contextvar set per question
+  by the eval runner and per turn by chat.py; bare tool use outside those contexts is
+  uncapped. `max_searches` is recorded in run artifacts. The measured cost of the cap
+  is in Status (`tool-call-constraint` vs `hybrid-train`).
 - **Eval**: two phases, deliberately separated. Generation (async, bounded concurrency)
   persists per-question JSONL to `runs/<run_id>.jsonl` so runs can be re-scored via
   `--rescore` without re-paying generation. Scoring: GEval answer correctness vs the
@@ -114,12 +122,22 @@ is identical under both merge rules, so bucket deltas across these rescores are 
 | V2A + voyage † | 0.39 | 0.49 | 0.12 | 0.769† | 0.688† |
 | V2B + voyage | 0.46 | 0.46 | 0.08 | 0.823 | 0.709 |
 | V2C + voyage † | 0.45 | 0.41 | 0.14 | 0.786† | 0.657† |
-| **V2B + voyage + hybrid** (active, `hybrid-train`, n=47‡) | **0.51** | 0.38 | 0.11 | **0.862** | 0.695 |
+| V2B + voyage + hybrid (`hybrid-train`, n=47‡) | **0.51** | 0.38 | 0.11 | **0.862** | 0.695 |
+| **V3 (2-search cap) + voyage + hybrid** (active baseline, `tool-call-constraint`, n=49‡) | 0.43 | 0.51 | 0.06 | 0.816 | 0.698 |
+| V3 + voyage + vector (`tool-call-constraint-just-vector`) | 0.40 | 0.50 | 0.10 | 0.833 | 0.703 |
 
-‡ 3 questions (27, 47, 49) failed on transient OpenAI 520s during generation and are
-absent from the artifact. On the same 47 questions v2b-vector scores 0.49 correct /
-0.812 recall@5, so hybrid's retrieval gain (+5pts recall@5, +4.6pts recall@3) is real
-while the answer buckets are within judge noise.
+‡ Transient OpenAI 520s during generation: `hybrid-train` is missing questions 27, 47,
+49; `tool-call-constraint` is missing question 24. On the same 47 questions v2b-vector
+scores 0.49 correct / 0.812 recall@5, so hybrid's retrieval gain there (+5pts recall@5,
++4.6pts recall@3) is real while the answer buckets are within judge noise.
+
+**The 2-search cap is a deliberate UX-over-quality trade** and `tool-call-constraint`
+is the baseline going forward. Cost vs the uncapped `hybrid-train`: recall@5
+0.862→0.816, correct 0.51→0.43 (buckets shifted toward on-track; wrong stayed low at
+0.06). Avg tool calls 1.49, max 2 — the deterministic cap held. Notably, under the cap
+hybrid's recall edge over pure vector disappears (0.816 vs 0.833 — if anything
+reversed, within noise at n≈50): part of hybrid's earlier gain came through the agent's
+extra searches, which the cap removes.
 
 Findings so far: the reranker improves retrieval but not answers (the agent compensates
 for weak rankings with more searches — under the v2 merge rule identity-vs-voyage
@@ -134,8 +152,8 @@ ranked 6+; ceiling recall over the full merged ranking is 0.913.
 Gotchas: `runs/baseline.jsonl` is the **validation** split (script default at the time)
 — zero question overlap with the train runs; rescored for methodology consistency
 (0.40 correct) but don't cross-compare. deepeval aborts a whole scoring pass if the
-judge once emits invalid JSON — rerun `--rescore` on flake. TODO: V2B validation run
-for a held-out baseline.
+judge once emits invalid JSON — rerun `--rescore` on flake. TODO: validation run of
+the active config (V3 + voyage + hybrid) for a held-out baseline.
 
 ## Non-goals (for now)
 

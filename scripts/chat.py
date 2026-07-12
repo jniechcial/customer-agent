@@ -50,6 +50,7 @@ def main() -> None:
 
     setup_tracing("chat")
     from customer_agent.agent.agent import build_agent
+    from customer_agent.agent.tools import search_budget
     from customer_agent.config import get_settings
 
     # openinference-instrumentation-openai (<=0.1.52) calls response.parse() synchronously
@@ -80,10 +81,13 @@ def main() -> None:
                 break
 
             turn_input = conversation + [{"role": "user", "content": user_input}]
-            if args.show_steps:
-                result = asyncio.run(run_turn_streamed(agent, turn_input, console))
-            else:
-                result = Runner.run_sync(agent, turn_input)
+            # Fresh search budget each user turn; asyncio.run and run_sync both
+            # copy the current context, so the budget reaches the tool calls.
+            with search_budget():
+                if args.show_steps:
+                    result = asyncio.run(run_turn_streamed(agent, turn_input, console))
+                else:
+                    result = Runner.run_sync(agent, turn_input)
             conversation = result.to_input_list()
             console.print()
             console.print(Markdown(str(result.final_output)))
