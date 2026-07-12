@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     # --- Retrieval ---
     k_retrieve: int = 20  # candidates fetched from Weaviate
     k_final: int = 5      # returned to the agent after reranking
-    search_mode: Literal["vector", "hybrid"] = "vector"
+    search_mode: Literal["vector", "hybrid"] = "hybrid"
     hybrid_alpha: float = 0.5  # hybrid fusion weight: 1.0 = pure vector, 0.0 = pure BM25
     reranker: Literal["identity", "voyage"] = "voyage"
     rerank_model: str = "rerank-2.5"

@@ -19,6 +19,7 @@ out piece by piece.
 | Tracing | Arize Phoenix (Docker) + OpenInference | Agent runs, tool calls, LLM calls, eval runs — all traced. Agents SDK's default export to the OpenAI platform is disabled. |
 | Eval framework | deepeval | LLM-judged correctness + custom deterministic retrieval metrics. |
 | Reranker | Voyage `rerank-2.5` (API) | Effectively free at project scale (200M-token free tier), top-tier quality, no torch dependency. `reranker=identity` env knob restores the passthrough for A/B. |
+| First-stage search | Hybrid BM25+vector, α=0.5 (Weaviate native) | +5pts recall@5 over pure vector on identical train questions, answers unchanged. `search_mode=vector` env knob restores pure vector for A/B. |
 | Tooling | uv, Python 3.12, `src/` layout | |
 
 ## Architecture
@@ -111,8 +112,14 @@ is identical under both merge rules, so bucket deltas across these rescores are 
 | V1 prompt + identity (`v1-identity-train`) | 0.28 | 0.60 | 0.12 | 0.743 | 0.563 |
 | V1 + voyage (`voyage-reranker-train`) | 0.22 | 0.72 | 0.06 | 0.793 | 0.684 |
 | V2A + voyage † | 0.39 | 0.49 | 0.12 | 0.769† | 0.688† |
-| **V2B + voyage** (active) | **0.46** | 0.46 | 0.08 | 0.823 | 0.709 |
+| V2B + voyage | 0.46 | 0.46 | 0.08 | 0.823 | 0.709 |
 | V2C + voyage † | 0.45 | 0.41 | 0.14 | 0.786† | 0.657† |
+| **V2B + voyage + hybrid** (active, `hybrid-train`, n=47‡) | **0.51** | 0.38 | 0.11 | **0.862** | 0.695 |
+
+‡ 3 questions (27, 47, 49) failed on transient OpenAI 520s during generation and are
+absent from the artifact. On the same 47 questions v2b-vector scores 0.49 correct /
+0.812 recall@5, so hybrid's retrieval gain (+5pts recall@5, +4.6pts recall@3) is real
+while the answer buckets are within judge noise.
 
 Findings so far: the reranker improves retrieval but not answers (the agent compensates
 for weak rankings with more searches — under the v2 merge rule identity-vs-voyage
