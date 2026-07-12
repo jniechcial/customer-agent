@@ -69,7 +69,15 @@ user-simulator stub). Entry points live in `scripts/`; eval artifacts in `runs/`
   `--rescore` without re-paying generation. Scoring: GEval answer correctness vs the
   dataset answer (judge = Claude via deepeval custom model; criteria must tolerate style
   differences — dataset answers are procedural markdown), plus deterministic
-  precision/recall/MRR/MAP@{5,10} at **article level**. Per-question results (all
+  precision/recall/MRR/MAP@{5,10} at **article level**. The judge is **grounded in
+  gold∩retrieved article texts** (passed as GEval context): extras beyond the terse
+  reference answer are fine when supported by a gold article the agent actually
+  retrieved; specifics found in neither are hallucinations. Gold articles the agent
+  never retrieved are withheld on purpose — matching them is parametric memory, not
+  grounding. Correctness stays binary; the partial flag means "on the right track", and
+  the pair reads as three buckets: correct / on-track (0,1) / wrong (0,0). The two flags
+  are independent LLM calls and overlap on correct answers, so read buckets, not the
+  partial mean. Per-question results (all
   scores + the judge's reasoning) go to `runs/<run_id>.scores.jsonl` AND to Phoenix as
   span annotations: each question is wrapped in a `question-<i>` root span whose ids are
   persisted in the artifact, so scoring (incl. `--rescore`) attaches judge score/label/
@@ -84,11 +92,28 @@ user-simulator stub). Entry points live in `scripts/`; eval artifacts in `runs/`
 
 ## Status (2026-07-12)
 
-M0–M5 done and smoke-tested end to end with real APIs: full KB indexed (10,081 chunks),
-chat grounded with 3–4 refined searches per question, eval plumbing validated on 3
-questions (correctness 0.63, recall@10 0.67 — NOT a baseline). Voyage rerank-2.5 wired
-in and smoke-tested (1-question eval run + Phoenix RERANKER spans). TODO: full
-100-question validation run for a real baseline, ideally identity vs voyage.
+M0–M5 done; full KB indexed (10,081 chunks). First real experiment ladder complete on
+the 50-question train split, all runs scored with the grounded judge (artifacts in
+`runs/`, old-judge scores in `runs/judge-v1-backup/`):
+
+| config | correct | on-track | wrong | recall@5 | mrr@5 |
+|---|---|---|---|---|---|
+| V1 prompt + identity (`v1-identity-train`) | 0.24 | 0.64 | 0.12 | 0.637 | 0.538 |
+| V1 + voyage (`voyage-reranker-train`) | 0.20 | 0.64 | 0.16 | 0.773 | 0.673 |
+| V2A + voyage | 0.39 | 0.49 | 0.12 | 0.769 | 0.688 |
+| **V2B + voyage** (active) | **0.50** | 0.38 | 0.12 | 0.793 | 0.695 |
+| V2C + voyage | 0.45 | 0.41 | 0.14 | 0.786 | 0.657 |
+
+Findings so far: the reranker improves retrieval but not answers (the agent compensates
+for weak rankings with more searches); the prompt converts retrieval into correctness —
+V2B ("faithful messenger for one primary article") is 2.5× the V1 baseline. The wrong
+bucket barely moves (~0.12–0.16); the game is converting on-track into correct.
+
+Gotchas: `runs/baseline.jsonl` is the **validation** split (script default at the time)
+— zero question overlap with the train runs; rescored for methodology consistency
+(0.40 correct) but don't cross-compare. deepeval aborts a whole scoring pass if the
+judge once emits invalid JSON — rerun `--rescore` on flake. TODO: V2B validation run
+for a held-out baseline.
 
 ## Non-goals (for now)
 
@@ -99,7 +124,13 @@ allows all of these; they're intentionally not built.
 ## Open questions
 
 - Per-call retrieval metrics if the agent starts issuing many refined queries.
-- GEval criteria wording — style mismatch between conversational answers and procedural
-  dataset answers is the main risk to score validity.
-- Statistical rigor at n=100 (bootstrap CIs, paired tests) — add when experiments
-  disagree by small margins.
+- Judge grounding is gold-articles-only by design: true facts pulled from *non-gold*
+  retrieved articles still count as ungrounded. Deliberate (don't reward wrong-article
+  content), but it penalizes some genuinely helpful cross-article answers.
+- In sentinel cases (agent retrieved no gold article) an answer with extras can never
+  score correct, even if it covers the full expected resolution.
+- The two judge flags could collapse into one 3-class call (correct/on-track/wrong):
+  removes the overlap inconsistency and halves judge cost.
+- Statistical rigor at n=50 (bootstrap CIs, paired tests) — add when experiments
+  disagree by small margins; reranker-vs-identity correctness (0.24 vs 0.20) is already
+  inside the noise band.
