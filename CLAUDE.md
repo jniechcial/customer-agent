@@ -53,16 +53,23 @@ user-simulator stub). Entry points live in `scripts/`; eval artifacts in `runs/`
   `article_type`, `chunk_index`. The Weaviate collection name is derived from the
   chunk/embedding config (e.g. `KB_chunk512o64_te3small`) so index experiments coexist;
   the active collection is a config knob. Indexing is batched and idempotent.
-- **Retrieval**: embed query → vector search top `k_retrieve` (20) → rerank (Voyage
+- **Retrieval**: embed query → vector or hybrid BM25+vector search (`search_mode`/
+  `hybrid_alpha` knobs; hybrid uses Weaviate's native fusion on the same collection)
+  top `k_retrieve` (20) → rerank (Voyage
   `rerank-2.5`; `reranker`/`rerank_model` knobs, identity fallback) → top `k_final` (5)
   → format with article id/url so the agent can cite. Reranking reorders all 20
   candidates without truncating, replaces chunk scores with Voyage relevance, and emits
   an OpenInference RERANKER span (input/output docs inspectable in Phoenix); the
-  reranker id is recorded per question in run artifacts. Output
+  reranker and search-mode ids are recorded per question in run artifacts. Output
   granularity (chunks vs full articles) is a knob. `RetrievalResult` keeps ranked chunks
   AND deduped ranked `article_id`s (first-occurrence order) — the latter is what eval
   consumes. During eval, retrievals are recorded per-question so metrics see everything
-  across multiple tool calls (concat in call order, then dedup — v1 aggregation rule).
+  across multiple tool calls. Aggregation rule (v2): articles ordered by the **best rank
+  achieved in any call**, ties by call order, deduped. (v1 concatenated calls in order,
+  burying a later search's rank-1 hit behind the first call's whole ranking — it
+  penalized agents for searching more; switching to v2 alone moved v2b recall@5
+  0.793→0.823.) The merge is recomputed from per-call rankings at scoring time, so
+  `--rescore` applies the current rule to old artifacts.
 - **Agent**: one Agent, one tool; the model decides when/how often to search.
 - **Eval**: two phases, deliberately separated. Generation (async, bounded concurrency)
   persists per-question JSONL to `runs/<run_id>.jsonl` so runs can be re-scored via
@@ -93,21 +100,29 @@ user-simulator stub). Entry points live in `scripts/`; eval artifacts in `runs/`
 ## Status (2026-07-12)
 
 M0–M5 done; full KB indexed (10,081 chunks). First real experiment ladder complete on
-the 50-question train split, all runs scored with the grounded judge (artifacts in
-`runs/`, old-judge scores in `runs/judge-v1-backup/`):
+the 50-question train split, scored with the grounded judge (artifacts in `runs/`,
+old-judge scores in `runs/judge-v1-backup/`). Rows below use the v2 best-rank merge
+rule; V2A/V2C were not rescored and keep v1-merge retrieval numbers (marked †).
+Judge buckets shift a few points on any rescore (LLM variance) — the grounding input
+is identical under both merge rules, so bucket deltas across these rescores are noise.
 
 | config | correct | on-track | wrong | recall@5 | mrr@5 |
 |---|---|---|---|---|---|
-| V1 prompt + identity (`v1-identity-train`) | 0.24 | 0.64 | 0.12 | 0.637 | 0.538 |
-| V1 + voyage (`voyage-reranker-train`) | 0.20 | 0.64 | 0.16 | 0.773 | 0.673 |
-| V2A + voyage | 0.39 | 0.49 | 0.12 | 0.769 | 0.688 |
-| **V2B + voyage** (active) | **0.50** | 0.38 | 0.12 | 0.793 | 0.695 |
-| V2C + voyage | 0.45 | 0.41 | 0.14 | 0.786 | 0.657 |
+| V1 prompt + identity (`v1-identity-train`) | 0.28 | 0.60 | 0.12 | 0.743 | 0.563 |
+| V1 + voyage (`voyage-reranker-train`) | 0.22 | 0.72 | 0.06 | 0.793 | 0.684 |
+| V2A + voyage † | 0.39 | 0.49 | 0.12 | 0.769† | 0.688† |
+| **V2B + voyage** (active) | **0.46** | 0.46 | 0.08 | 0.823 | 0.709 |
+| V2C + voyage † | 0.45 | 0.41 | 0.14 | 0.786† | 0.657† |
 
 Findings so far: the reranker improves retrieval but not answers (the agent compensates
-for weak rankings with more searches); the prompt converts retrieval into correctness —
-V2B ("faithful messenger for one primary article") is 2.5× the V1 baseline. The wrong
-bucket barely moves (~0.12–0.16); the game is converting on-track into correct.
+for weak rankings with more searches — under the v2 merge rule identity-vs-voyage
+recall@5 is 0.743 vs 0.793, much closer than the v1 rule suggested); the prompt converts
+retrieval into correctness — V2B ("faithful messenger for one primary article") is ~2×
+the V1 baseline. The wrong bucket barely moves (~0.06–0.14); the game is converting
+on-track into correct. Recall loss decomposition on v2b (66 gold pairs): 12% never
+retrieved by any call (2 easy under raw-question vector search — agent query
+formulation; 2 BM25-only; 2 need k>20; 2 unfindable at k=100), 12% retrieved but
+ranked 6+; ceiling recall over the full merged ranking is 0.913.
 
 Gotchas: `runs/baseline.jsonl` is the **validation** split (script default at the time)
 — zero question overlap with the train runs; rescored for methodology consistency
@@ -117,13 +132,15 @@ for a held-out baseline.
 
 ## Non-goals (for now)
 
-Additional rerankers (local cross-encoder, LLM-based), alternative chunkers, hybrid/BM25
-search, query rewriting, multi-turn eval, any frontend or deployment. The architecture
-allows all of these; they're intentionally not built.
+Additional rerankers (local cross-encoder, LLM-based), alternative chunkers, query
+rewriting, multi-turn eval, any frontend or deployment. The architecture allows all of
+these; they're intentionally not built.
 
 ## Open questions
 
-- Per-call retrieval metrics if the agent starts issuing many refined queries.
+- Per-call retrieval metrics if the agent starts issuing many refined queries (the v2
+  best-rank merge removed the worst cross-call distortion, but per-call quality is
+  still invisible).
 - Judge grounding is gold-articles-only by design: true facts pulled from *non-gold*
   retrieved articles still count as ungrounded. Deliberate (don't reward wrong-article
   content), but it penalizes some genuinely helpful cross-article answers.
@@ -132,5 +149,5 @@ allows all of these; they're intentionally not built.
 - The two judge flags could collapse into one 3-class call (correct/on-track/wrong):
   removes the overlap inconsistency and halves judge cost.
 - Statistical rigor at n=50 (bootstrap CIs, paired tests) — add when experiments
-  disagree by small margins; reranker-vs-identity correctness (0.24 vs 0.20) is already
+  disagree by small margins; reranker-vs-identity correctness (0.28 vs 0.22) is already
   inside the noise band.

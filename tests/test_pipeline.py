@@ -15,8 +15,8 @@ def build_pipeline(candidates, k_retrieve=20, k_final=5, monkeypatch=None, setti
         def __init__(self):
             self.calls = []
 
-        def search(self, vector, k):
-            self.calls.append((vector, k))
+        def search(self, query, vector, k):
+            self.calls.append((query, vector, k))
             return candidates[:k]
 
     class ReverseReranker:
@@ -51,7 +51,8 @@ def test_search_keeps_full_ranking_and_slices_tool_chunks(monkeypatch):
     # ReverseReranker reordered: tool chunks are the reranker's top, not the retriever's.
     assert [c.article_id for c in result.tool_chunks] == ["art7", "art6", "art5"]
     assert result.tool_chunks == result.ranked_chunks[:3]
-    assert pipeline.retriever.calls[0][1] == 8  # retriever got k_retrieve
+    assert pipeline.retriever.calls[0][2] == 8  # retriever got k_retrieve
+    assert pipeline.retriever.calls[0][0] == "some question"  # query text passed through (hybrid needs it)
 
 
 def test_format_chunks_includes_title_url_and_text(monkeypatch):

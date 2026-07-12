@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     # --- Retrieval ---
     k_retrieve: int = 20  # candidates fetched from Weaviate
     k_final: int = 5      # returned to the agent after reranking
+    search_mode: Literal["vector", "hybrid"] = "vector"
+    hybrid_alpha: float = 0.5  # hybrid fusion weight: 1.0 = pure vector, 0.0 = pure BM25
     reranker: Literal["identity", "voyage"] = "voyage"
     rerank_model: str = "rerank-2.5"
     # What the tool hands to the agent: raw chunks or the full articles the hits belong to.
@@ -56,6 +58,11 @@ class Settings(BaseSettings):
     def reranker_id(self) -> str:
         """Reranker identity recorded in run artifacts so runs stay comparable."""
         return f"voyage:{self.rerank_model}" if self.reranker == "voyage" else self.reranker
+
+    @property
+    def search_mode_id(self) -> str:
+        """Search-mode identity recorded in run artifacts so runs stay comparable."""
+        return f"hybrid:a{self.hybrid_alpha}" if self.search_mode == "hybrid" else self.search_mode
 
     @property
     def collection_name(self) -> str:

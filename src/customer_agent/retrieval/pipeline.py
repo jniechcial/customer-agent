@@ -41,7 +41,7 @@ class RetrievalPipeline:
     def search(self, query: str) -> RetrievalResult:
         settings = get_settings()
         vector = self.embedder.embed_query(query)
-        candidates = self.retriever.search(vector, k=settings.k_retrieve)
+        candidates = self.retriever.search(query, vector, k=settings.k_retrieve)
         ranked = self.reranker.rerank(query, candidates)
         return RetrievalResult(
             query=query,
