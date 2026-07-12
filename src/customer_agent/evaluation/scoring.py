@@ -93,6 +93,10 @@ def write_scores(
 # scores file and the summary.
 _RUN_LEVEL_METRIC_PREFIXES = ("mrr@", "map@")
 
+# Binary flag metrics where the score means "has this property", not pass/fail —
+# label them by the property so Phoenix filtering reads naturally.
+_FLAG_METRIC_LABELS = {"AnswerPartiallyCorrect": {True: "partial", False: "not-partial"}}
+
 
 def build_annotations(
     records: list[dict], case_results: dict[str, dict[str, dict]]
@@ -113,6 +117,12 @@ def build_annotations(
             if metric_name.startswith(_RUN_LEVEL_METRIC_PREFIXES):
                 continue
             llm_judged = bool(data.get("evaluation_model"))
+            if metric_name in _FLAG_METRIC_LABELS:
+                label = _FLAG_METRIC_LABELS[metric_name][bool(data["score"])]
+            elif llm_judged:
+                label = "pass" if data.get("success") else "fail"
+            else:
+                label = None
             annotations.append(
                 {
                     "span_id": span_id,
@@ -120,9 +130,7 @@ def build_annotations(
                     "annotator_kind": "LLM" if llm_judged else "CODE",
                     "result": {
                         "score": data["score"],
-                        "label": (
-                            ("pass" if data.get("success") else "fail") if llm_judged else None
-                        ),
+                        "label": label,
                         "explanation": data.get("reason"),
                     },
                 }
@@ -186,13 +194,21 @@ def score(artifact: Path) -> dict:
     per-question scores file + Phoenix annotations + summary."""
     from deepeval import evaluate
 
-    from customer_agent.evaluation.answer_metrics import make_correctness_metric
+    from customer_agent.evaluation.answer_metrics import answer_metrics
     from customer_agent.evaluation.retrieval_metrics import retrieval_metrics
     from customer_agent.evaluation.runner import load_run
 
     settings = get_settings()
     records = load_run(artifact)
-    metrics = [make_correctness_metric(), *retrieval_metrics(settings.metric_ks)]
+    failed = [r for r in records if r.get("error")]
+    if failed:
+        print(
+            f"WARNING: skipping {len(failed)} failed questions "
+            f"(indices {[r.get('index') for r in failed]})",
+            file=sys.stderr,
+        )
+        records = [r for r in records if not r.get("error")]
+    metrics = [*answer_metrics(), *retrieval_metrics(settings.metric_ks)]
     result = evaluate(test_cases=build_test_cases(records), metrics=metrics)
 
     case_results = extract_case_results(result)

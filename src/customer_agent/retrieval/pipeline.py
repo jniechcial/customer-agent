@@ -84,3 +84,12 @@ def get_pipeline() -> RetrievalPipeline:
     if _pipeline is None:
         _pipeline = RetrievalPipeline()
     return _pipeline
+
+
+def close_pipeline() -> None:
+    """Close the singleton's Weaviate connection. Entry points call this on exit;
+    the next get_pipeline() reconnects lazily."""
+    global _pipeline
+    if _pipeline is not None:
+        _pipeline.retriever.close()
+        _pipeline = None

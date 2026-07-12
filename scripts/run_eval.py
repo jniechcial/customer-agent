@@ -13,11 +13,26 @@ Summary is printed and written to runs/<run_id>.summary.json.
 import argparse
 import json
 import os
+import warnings
 from pathlib import Path
 
 os.environ.setdefault("DEEPEVAL_TELEMETRY_OPT_OUT", "YES")
 
 from customer_agent.tracing import setup_tracing
+
+
+def _quiet_connection_gc_warnings() -> None:
+    """Silence asyncio ResourceWarnings for GC'd keepalive connections.
+
+    Under concurrent load, the HTTP pools inside the OpenAI/judge/weaviate clients
+    drop idle connections whose transports are then garbage-collected unclosed —
+    benign churn with nothing for us to close. Python ignores ResourceWarning by
+    default, but a dep re-enables warnings at import time, so this is registered
+    after the phase's imports (later filters take precedence) and stays scoped to
+    these two messages.
+    """
+    warnings.filterwarnings("ignore", message="unclosed transport", category=ResourceWarning)
+    warnings.filterwarnings("ignore", message="unclosed <socket", category=ResourceWarning)
 
 
 def main() -> None:
@@ -39,6 +54,7 @@ def main() -> None:
 
         run_name = args.run_id or f"{args.split}-{os.getpid()}"
         setup_tracing(f"eval-{run_name}")
+        _quiet_connection_gc_warnings()
         artifact = asyncio.run(
             generate_run(args.split, subset=args.subset, limit=args.limit, run_id=args.run_id)
         )
@@ -46,6 +62,7 @@ def main() -> None:
 
     from customer_agent.evaluation.scoring import score
 
+    _quiet_connection_gc_warnings()  # deepeval's import may prepend new filters
     summary = score(artifact)
     summary_path = artifact.with_suffix(".summary.json")
     summary_path.write_text(json.dumps(summary, indent=2))

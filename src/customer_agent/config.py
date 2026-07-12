@@ -46,7 +46,7 @@ class Settings(BaseSettings):
 
     # --- Eval ---
     eval_concurrency: int = 4
-    metric_ks: tuple[int, ...] = (5, 10)
+    metric_ks: tuple[int, ...] = (3, 5)
     max_turns: int = 1  # single-turn eval for now; >1 once the synthetic user lands
 
     @property
