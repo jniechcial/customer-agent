@@ -17,6 +17,7 @@ dependencies = [
     "pydantic-settings>=2.7",
     "tiktoken>=0.8",
     "rich>=13",
+    "voyageai>=0.3",
 ]
 
 [build-system]

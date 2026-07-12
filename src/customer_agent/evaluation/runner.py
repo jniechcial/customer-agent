@@ -105,6 +105,7 @@ async def _run_agent(agent, tracer, settings, message: str, row: dict, index: in
         ),
         "tool_calls": per_call,
         "agent_model": settings.agent_model,
+        "reranker": settings.reranker_id,
         "usage": {
             "requests": usage.requests,
             "input_tokens": usage.input_tokens,

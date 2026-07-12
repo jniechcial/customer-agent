@@ -22,7 +22,7 @@ class RetrievedChunk:
     article_type: str
     chunk_index: int
     text: str
-    score: float  # similarity (1 - cosine distance); higher is better
+    score: float  # higher is better; similarity (1 - cosine distance) until a reranker replaces it with its own relevance score
 
 
 class WeaviateRetriever:

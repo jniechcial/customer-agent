@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     hf_token: str = ""
+    voyage_api_key: str = ""
 
     # --- Models ---
     agent_model: str = "gpt-5.5"
@@ -35,6 +36,8 @@ class Settings(BaseSettings):
     # --- Retrieval ---
     k_retrieve: int = 20  # candidates fetched from Weaviate
     k_final: int = 5      # returned to the agent after reranking
+    reranker: Literal["identity", "voyage"] = "voyage"
+    rerank_model: str = "rerank-2.5"
     # What the tool hands to the agent: raw chunks or the full articles the hits belong to.
     tool_output_granularity: Literal["chunks", "articles"] = "chunks"
 
@@ -48,6 +51,11 @@ class Settings(BaseSettings):
     eval_concurrency: int = 4
     metric_ks: tuple[int, ...] = (3, 5)
     max_turns: int = 1  # single-turn eval for now; >1 once the synthetic user lands
+
+    @property
+    def reranker_id(self) -> str:
+        """Reranker identity recorded in run artifacts so runs stay comparable."""
+        return f"voyage:{self.rerank_model}" if self.reranker == "voyage" else self.reranker
 
     @property
     def collection_name(self) -> str:

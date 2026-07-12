@@ -18,6 +18,7 @@ out piece by piece.
 | Embeddings | Client-side (`text-embedding-3-small`) | Embedding model is a config knob, not baked into the collection. |
 | Tracing | Arize Phoenix (Docker) + OpenInference | Agent runs, tool calls, LLM calls, eval runs — all traced. Agents SDK's default export to the OpenAI platform is disabled. |
 | Eval framework | deepeval | LLM-judged correctness + custom deterministic retrieval metrics. |
+| Reranker | Voyage `rerank-2.5` (API) | Effectively free at project scale (200M-token free tier), top-tier quality, no torch dependency. `reranker=identity` env knob restores the passthrough for A/B. |
 | Tooling | uv, Python 3.12, `src/` layout | |
 
 ## Architecture
@@ -31,7 +32,7 @@ out piece by piece.
                                       ▼
                        ┌──────────────────────────────┐
                        │  RetrievalPipeline           │
-                       │  retrieve ──► rerank (stub)  │──► Weaviate (Docker)
+                       │  retrieve ──► rerank (Voyage)│──► Weaviate (Docker)
                        └──────────────────────────────┘
  scripts/index_kb.py ──► Chunker ──► Embedder ──► Weaviate
 
@@ -40,7 +41,7 @@ out piece by piece.
 
 `src/customer_agent/` packages: `config.py` (pydantic-settings, every knob),
 `tracing.py` (Phoenix bootstrap, one call per entry point), `agent/` (Agent, prompts,
-tool), `retrieval/` (pipeline, retriever, reranker stub, embeddings), `indexing/`
+tool), `retrieval/` (pipeline, retriever, rerankers, embeddings), `indexing/`
 (chunker, indexer), `data/` (HF loaders, splits), `evaluation/` (runner, metrics,
 user-simulator stub). Entry points live in `scripts/`; eval artifacts in `runs/`
 (gitignored, JSONL per run).
@@ -52,8 +53,12 @@ user-simulator stub). Entry points live in `scripts/`; eval artifacts in `runs/`
   `article_type`, `chunk_index`. The Weaviate collection name is derived from the
   chunk/embedding config (e.g. `KB_chunk512o64_te3small`) so index experiments coexist;
   the active collection is a config knob. Indexing is batched and idempotent.
-- **Retrieval**: embed query → vector search top `k_retrieve` (20) → rerank (identity
-  stub) → top `k_final` (5) → format with article id/url so the agent can cite. Output
+- **Retrieval**: embed query → vector search top `k_retrieve` (20) → rerank (Voyage
+  `rerank-2.5`; `reranker`/`rerank_model` knobs, identity fallback) → top `k_final` (5)
+  → format with article id/url so the agent can cite. Reranking reorders all 20
+  candidates without truncating, replaces chunk scores with Voyage relevance, and emits
+  an OpenInference RERANKER span (input/output docs inspectable in Phoenix); the
+  reranker id is recorded per question in run artifacts. Output
   granularity (chunks vs full articles) is a knob. `RetrievalResult` keeps ranked chunks
   AND deduped ranked `article_id`s (first-occurrence order) — the latter is what eval
   consumes. During eval, retrievals are recorded per-question so metrics see everything
@@ -77,23 +82,23 @@ user-simulator stub). Entry points live in `scripts/`; eval artifacts in `runs/`
 - **Phoenix**: UI on host port **6007** (6006 was taken locally). Project names per
   entry point: `chat`, `indexing`, `eval-<run_id>`.
 
-## Status (2026-07-11)
+## Status (2026-07-12)
 
 M0–M5 done and smoke-tested end to end with real APIs: full KB indexed (10,081 chunks),
 chat grounded with 3–4 refined searches per question, eval plumbing validated on 3
-questions (correctness 0.63, recall@10 0.67 — NOT a baseline). TODO: full 100-question
-validation run for a real baseline.
+questions (correctness 0.63, recall@10 0.67 — NOT a baseline). Voyage rerank-2.5 wired
+in and smoke-tested (1-question eval run + Phoenix RERANKER spans). TODO: full
+100-question validation run for a real baseline, ideally identity vs voyage.
 
 ## Non-goals (for now)
 
-Reranker implementations, alternative chunkers, hybrid/BM25 search, query rewriting,
-multi-turn eval, any frontend or deployment. The architecture allows all of these;
-they're intentionally not built.
+Additional rerankers (local cross-encoder, LLM-based), alternative chunkers, hybrid/BM25
+search, query rewriting, multi-turn eval, any frontend or deployment. The architecture
+allows all of these; they're intentionally not built.
 
 ## Open questions
 
 - Per-call retrieval metrics if the agent starts issuing many refined queries.
-- Reranker direction (local cross-encoder vs API) — decides future deps/keys.
 - GEval criteria wording — style mismatch between conversational answers and procedural
   dataset answers is the main risk to score validity.
 - Statistical rigor at n=100 (bootstrap CIs, paired tests) — add when experiments
