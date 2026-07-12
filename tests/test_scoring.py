@@ -62,7 +62,14 @@ RECORDS = [
 ]
 
 
-def test_build_test_cases_maps_fields():
+def test_build_test_cases_maps_fields(monkeypatch):
+    kb = {
+        "A": {"url": "u/A", "contents": "BODY A"},
+        "C": {"url": "u/C", "contents": "BODY C"},
+        "D": {"url": "u/D", "contents": "BODY D"},
+    }
+    monkeypatch.setattr("customer_agent.data.wixqa.kb_by_article_id", lambda: kb)
+
     cases = build_test_cases(RECORDS)
     assert len(cases) == 2
     tc = cases[0]
@@ -70,8 +77,12 @@ def test_build_test_cases_maps_fields():
     assert tc.input == "q1"
     assert tc.actual_output == "a1"
     assert tc.expected_output == "e1"
-    assert tc.context == ["A"]                 # gold ids
+    assert tc.context == ["[u/A]\nBODY A"]     # judge grounding: gold ∩ retrieved texts
     assert tc.retrieval_context == ["A", "B"]  # ranked retrieved ids
+    assert tc.metadata == {"gold_article_ids": ["A"]}
+    # Record 1 retrieved nothing: grounding degrades to the sentinel, not gold texts.
+    assert cases[1].context is not None
+    assert "No knowledge-base articles" in cases[1].context[0]
 
 
 def fake_result(metrics_per_test: dict[str, list[dict]]):

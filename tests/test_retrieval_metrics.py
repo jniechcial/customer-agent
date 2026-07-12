@@ -11,7 +11,13 @@ from customer_agent.evaluation.retrieval_metrics import (
 
 
 def case(gold: list[str], retrieved: list[str]) -> LLMTestCase:
-    return LLMTestCase(input="q", actual_output="a", context=gold, retrieval_context=retrieved)
+    # Gold ids ride in metadata (context belongs to the judge; see module docstring).
+    return LLMTestCase(
+        input="q",
+        actual_output="a",
+        metadata={"gold_article_ids": gold},
+        retrieval_context=retrieved,
+    )
 
 
 # gold = {A, B}; ranking = [X, A, B, Y, Z]
