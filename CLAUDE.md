@@ -125,15 +125,29 @@ user-simulator stub). Entry points live in `scripts/`; eval artifacts in `runs/`
 
 M0–M5 done; full KB indexed (10,081 chunks).
 
-**Active baseline: `full-articles-train`** (V4 prompt + full-article tool output +
-judge v3), the first run clean end-to-end under the current setup, on the **full
-100-question train split** (earlier runs used only the first 50):
+**Active baseline: `prompt-v5-train`** (V5 prompt + full-article tool output +
+judge v3) on the **full 100-question train split** (earlier runs used only the
+first 50):
 
 | config | correct | on-track | wrong | recall@5 |
 |---|---|---|---|---|
 | V3 + chunks (`tool-call-constraint`, judge-v3 rescore◊, n=49) | 0.63 | 0.33 | 0.04 | 0.816 |
 | V4 + chunks (`system-v4`, judge-v3 rescore◊, n=50) | 0.70 | 0.24 | 0.06 | 0.800 |
-| **V4 + full articles (`full-articles-train`, n=100)** | **0.74** | 0.23 | **0.03** | 0.855 |
+| V4 + full articles (`full-articles-train`, n=100) | 0.74 | 0.23 | **0.03** | **0.855** |
+| **V5 + full articles (`prompt-v5-train`, n=100)** | **0.83** | 0.14 | **0.03** | 0.820 |
+
+V5 (see `prompts.py`) came from the failure analysis of `full-articles-train`'s 26
+non-correct answers (16 of which had every gold article in the tool output — the
+dominant failure was answer-side, not retrieval): full-fidelity relay instead of
+V4's "each briefly" + a pre-send verify pass (11 failures), a ban on negative
+meta-commentary like "the docs don't say X" (5, twice factually wrong), and
+both-readings hedging for ambiguous questions plus a site-owner persona default
+(4, incl. 2 of 3 outright wrongs). Result: 14 of the 26 flipped to correct (7
+completeness, 3 meta-commentary, 2 ambiguity, 2 retrieval-adjacent) vs 5 losses
+(4→on-track, 1→wrong Q96 Portfolio-vs-CMS interpretation) — same failure classes
+as before, within cross-run churn. recall@5 0.855→0.820 while correctness rose
++9pp: more evidence the game is answer-side. Cost $0.066/answer (was $0.054),
+avg tool calls 1.23, latency avg 18s.
 
 ◊ Rescored chunk-run grounding uses the fallback (full texts of the top-`k_final`
 prefix — generous: the agent only saw chunks); indicative only. On the shared first
@@ -199,8 +213,17 @@ whole scoring pass if the judge once emits invalid JSON — rerun `--rescore` on
 The partial flag still overlaps correct answers (53 of 74 corrects on
 `full-articles-train` also scored partial=1 — independent LLM calls, the partial judge
 is stricter about missingness): read buckets, never the partial mean. TODO: validation
-run of the active config (V4 + full articles + voyage + hybrid) for a held-out
+run of the active config (V5 + full articles + voyage + hybrid) for a held-out
 baseline.
+
+**Parked next experiment (Bet 3 from the `full-articles-train` failure analysis,
+2026-07-13): retrieval-side fixes.** 10 of that run's 26 failures had unseen gold;
+3 of those had the gold sitting at merged rank 6–18 (Q52: 6&8, Q64: 6, Q69: 18) —
+just below the top-5 tool-output cutoff. Try (a) raising the tool-output cutoff
+from 5 to ~8 articles (separate knob from `k_final` if reranker quality at 5 should
+stay measurable), and (b) a nudge to spend the second search on the uncovered part
+of multi-part/enumerative questions (7 of the 10 unseen-gold failures used only 1
+of 2 searches). NB: recall@5 won't show win (a) — read seen-gold / recall@8.
 
 ## Non-goals (for now)
 
