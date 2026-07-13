@@ -134,7 +134,8 @@ first 50):
 | V3 + chunks (`tool-call-constraint`, judge-v3 rescore◊, n=49) | 0.63 | 0.33 | 0.04 | 0.816 |
 | V4 + chunks (`system-v4`, judge-v3 rescore◊, n=50) | 0.70 | 0.24 | 0.06 | 0.800 |
 | V4 + full articles (`full-articles-train`, n=100) | 0.74 | 0.23 | **0.03** | **0.855** |
-| **V5 + full articles (`prompt-v5-train`, n=100)** | **0.83** | 0.14 | **0.03** | 0.820 |
+| **V5 + full articles (`prompt-v5-train`, n=100)** | **0.83** | 0.14 | 0.03 | 0.820 |
+| V5 + full articles, k_final=8 (`k8-articles-train`, n=100) | 0.81 | 0.18 | **0.01** | 0.830 |
 
 V5 (see `prompts.py`) came from the failure analysis of `full-articles-train`'s 26
 non-correct answers (16 of which had every gold article in the tool output — the
@@ -216,14 +217,20 @@ is stricter about missingness): read buckets, never the partial mean. TODO: vali
 run of the active config (V5 + full articles + voyage + hybrid) for a held-out
 baseline.
 
-**Parked next experiment (Bet 3 from the `full-articles-train` failure analysis,
-2026-07-13): retrieval-side fixes.** 10 of that run's 26 failures had unseen gold;
-3 of those had the gold sitting at merged rank 6–18 (Q52: 6&8, Q64: 6, Q69: 18) —
-just below the top-5 tool-output cutoff. Try (a) raising the tool-output cutoff
-from 5 to ~8 articles (separate knob from `k_final` if reranker quality at 5 should
-stay measurable), and (b) a nudge to spend the second search on the uncovered part
-of multi-part/enumerative questions (7 of the 10 unseen-gold failures used only 1
-of 2 searches). NB: recall@5 won't show win (a) — read seen-gold / recall@8.
+**Bet 3(a) tried and rejected — `k8-articles-train` (2026-07-13): k_final 5→8 is
+not a win under the V5 prompt.** The retrieval mechanism worked exactly as
+predicted: seen-gold coverage 0.772→0.874, questions with ALL gold in tool output
+74→85 (recall@5 is computed from the full ranking and barely moved, as expected —
+`k_final` only slices tool output). But the answer layer gave it back: correct
+83→81. Only 3 flips are attributable to newly-seen gold (Q23, Q48, Q96); the 10
+losses look like context dilution — with 8 full articles the agent compresses
+steps away again (Q3, Q11), pads with tangents (Q57), or answers from a wrong-track
+extra article (Q86). One real effect: wrong 3→1 (broader coverage rescues the
+worst answers into on-track). Cost $0.066→$0.074/answer. Keep `k_final=5`; if
+revisited, pair a larger window with prompt work against big-context compression.
+Still open from Bet 3: (b) a nudge to spend the second search on the uncovered
+part of multi-part/enumerative questions (7 of 10 unseen-gold failures in
+`full-articles-train` used only 1 of 2 searches).
 
 ## Non-goals (for now)
 
