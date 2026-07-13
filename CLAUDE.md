@@ -86,7 +86,7 @@ user-simulator stub). Entry points live in `scripts/`; eval artifacts in `runs/`
   by the eval runner and per turn by chat.py; bare tool use outside those contexts is
   uncapped. `max_searches`, `prompt_version`, and `tool_output_granularity` are
   recorded in run artifacts (self-describing runs). The measured cost of the cap
-  is in Status (`tool-call-constraint` vs `hybrid-train`).
+  is in LOGBOOK.md (`tool-call-constraint` vs `hybrid-train`).
 - **Eval**: two phases, deliberately separated. Generation (async, bounded concurrency)
   persists per-question JSONL to `runs/<run_id>.jsonl` so runs can be re-scored via
   `--rescore` without re-paying generation. Scoring: GEval answer correctness vs the
@@ -121,116 +121,50 @@ user-simulator stub). Entry points live in `scripts/`; eval artifacts in `runs/`
 - **Phoenix**: UI on host port **6007** (6006 was taken locally). Project names per
   entry point: `chat`, `indexing`, `eval-<run_id>`.
 
-## Status (2026-07-12)
+## Status (2026-07-13)
 
 M0–M5 done; full KB indexed (10,081 chunks).
 
-**Active baseline: `prompt-v5-train`** (V5 prompt + full-article tool output +
-judge v3) on the **full 100-question train split** (earlier runs used only the
-first 50):
+**Active baseline: `prompt-v5-train`** — V5 prompt + full articles + Voyage + hybrid
++ 2-search cap, judge v3, full 100-question train split: **0.83 correct / 0.14
+on-track / 0.03 wrong**, recall@5 0.820, $0.066/answer, 18 s avg latency.
 
-| config | correct | on-track | wrong | recall@5 |
-|---|---|---|---|---|
-| V3 + chunks (`tool-call-constraint`, judge-v3 rescore◊, n=49) | 0.63 | 0.33 | 0.04 | 0.816 |
-| V4 + chunks (`system-v4`, judge-v3 rescore◊, n=50) | 0.70 | 0.24 | 0.06 | 0.800 |
-| V4 + full articles (`full-articles-train`, n=100) | 0.74 | 0.23 | **0.03** | **0.855** |
-| **V5 + full articles (`prompt-v5-train`, n=100)** | **0.83** | 0.14 | 0.03 | 0.820 |
-| V5 + full articles, k_final=8 (`k8-articles-train`, n=100) | 0.81 | 0.18 | **0.01** | 0.830 |
+**Per-run results live in [LOGBOOK.md](LOGBOOK.md)** — chronological, judge-v3
+scores throughout, with 🟢/🔴 deltas vs each run's comparison run. **After every
+experiment run, add a logbook entry** (1–2 bullets on what changed + a ladder row);
+if the judge changed, back up old scores to `runs/judge-vN-backup/` and `--rescore`
+first. Do not accumulate run tables or per-run analysis here.
 
-V5 (see `prompts.py`) came from the failure analysis of `full-articles-train`'s 26
-non-correct answers (16 of which had every gold article in the tool output — the
-dominant failure was answer-side, not retrieval): full-fidelity relay instead of
-V4's "each briefly" + a pre-send verify pass (11 failures), a ban on negative
-meta-commentary like "the docs don't say X" (5, twice factually wrong), and
-both-readings hedging for ambiguous questions plus a site-owner persona default
-(4, incl. 2 of 3 outright wrongs). Result: 14 of the 26 flipped to correct (7
-completeness, 3 meta-commentary, 2 ambiguity, 2 retrieval-adjacent) vs 5 losses
-(4→on-track, 1→wrong Q96 Portfolio-vs-CMS interpretation) — same failure classes
-as before, within cross-run churn. recall@5 0.855→0.820 while correctness rose
-+9pp: more evidence the game is answer-side. Cost $0.066/answer (was $0.054),
-avg tool calls 1.23, latency avg 18s.
+Durable findings:
 
-◊ Rescored chunk-run grounding uses the fallback (full texts of the top-`k_final`
-prefix — generous: the agent only saw chunks); indicative only. On the shared first
-50 questions full-articles ties system-v4 at 0.70 under honest grounding, with the 3
-gains being exactly the predicted chunk-granularity fixes (content in gold articles
-that never made it into a retrieved chunk) against 3 churn losses. Side effect of
-full articles: the agent searches less (1.38→1.20 avg calls) and merged recall@5
-*improves* (0.800→0.870 on the shared 50) — under the v2 best-rank merge a weak
-second call dilutes the top-5, so fewer searches means a cleaner ranking. Cost ~flat
-($0.054/answer).
+- The wrong bucket barely moves across all configs (0.01–0.08); the game is
+  converting on-track into correct, and it is **answer-side**: in
+  `full-articles-train`, 16 of 26 non-correct answers had every gold article in the
+  tool output. Both prompt overhauls that attacked the answer layer (V4, V5) paid
+  off; the retrieval-side win (k_final=8) did not.
+- The reranker and hybrid search improve retrieval but not answer buckets (the agent
+  compensates for weak rankings with extra searches). Caution on prompt history: the
+  judge-v2 claim that V2B doubled V1's correctness did not survive the judge-v3
+  rescore — most of that gap was v2 punishing V1's relay of non-gold articles (see
+  the logbook's ◊ grounding caveat before comparing across eras).
+- **The 2-search cap is a deliberate UX-over-quality trade** (kept everywhere since
+  `tool-call-constraint`). It cost ~5 pts recall@5 vs uncapped `hybrid-train` and
+  erased hybrid's recall edge over pure vector (part of that edge came through extra
+  searches); it halved tokens/cost. The deterministic cap held (max 2 calls).
+- Recall-loss decomposition on v2b (66 gold pairs): 12% never retrieved by any call
+  (2 easy under raw-question vector search — agent query formulation; 2 BM25-only;
+  2 need k>20; 2 unfindable at k=100), 12% retrieved but ranked 6+; ceiling recall
+  over the full merged ranking is 0.913.
 
-The judge-v3 change (see decisions table) roughly halved the on-track bucket by no
-longer scoring faithful relay of non-gold retrieved articles as hallucination:
-`tool-call-constraint` 0.43→0.63, `system-v4` 0.40→0.70 on identical answers. It also
-resolved the V4-prompt verdict: under judge v2 V4 looked like a regression (0.40 vs
-0.43); under v3 it is +7pts over V3 — its completeness/synthesis behaviors were being
-punished, not failing. Wrong stayed flat (0.04–0.06) — the new judge is not absolving
-bad answers.
+Gotchas: deepeval
+aborts a whole scoring pass if the judge once emits invalid JSON — rerun `--rescore`
+on flake. The partial flag overlaps correct answers (independent LLM calls, the
+partial judge is stricter about missingness): read buckets, never the partial mean.
 
---- Historical ladder below: scored with **judge v2** (gold∩retrieved grounding,
-backed up in `runs/judge-v2-backup/`); correctness columns NOT comparable to the
-judge-v3 numbers above. First 50 train questions only; v2 best-rank merge rule;
-V2A/V2C keep v1-merge retrieval numbers (marked †). Judge buckets shift a few points
-on any rescore (LLM variance).
-
-| config | correct | on-track | wrong | recall@5 | mrr@5 |
-|---|---|---|---|---|---|
-| V1 prompt + identity (`v1-identity-train`) | 0.28 | 0.60 | 0.12 | 0.743 | 0.563 |
-| V1 + voyage (`voyage-reranker-train`) | 0.22 | 0.72 | 0.06 | 0.793 | 0.684 |
-| V2A + voyage † | 0.39 | 0.49 | 0.12 | 0.769† | 0.688† |
-| V2B + voyage | 0.46 | 0.46 | 0.08 | 0.823 | 0.709 |
-| V2C + voyage † | 0.45 | 0.41 | 0.14 | 0.786† | 0.657† |
-| V2B + voyage + hybrid (`hybrid-train`, n=47‡) | **0.51** | 0.38 | 0.11 | **0.862** | 0.695 |
-| V3 (2-search cap) + voyage + hybrid (`tool-call-constraint`, n=49‡) | 0.43 | 0.51 | 0.06 | 0.816 | 0.698 |
-| V3 + voyage + vector (`tool-call-constraint-just-vector`) | 0.40 | 0.50 | 0.10 | 0.833 | 0.703 |
-
-‡ Transient OpenAI 520s during generation: `hybrid-train` is missing questions 27, 47,
-49; `tool-call-constraint` is missing question 24. On the same 47 questions v2b-vector
-scores 0.49 correct / 0.812 recall@5, so hybrid's retrieval gain there (+5pts recall@5,
-+4.6pts recall@3) is real while the answer buckets are within judge noise.
-
-**The 2-search cap is a deliberate UX-over-quality trade** (kept in all later
-configs). Cost vs the uncapped `hybrid-train`: recall@5
-0.862→0.816, correct 0.51→0.43 (buckets shifted toward on-track; wrong stayed low at
-0.06). Avg tool calls 1.49, max 2 — the deterministic cap held. Notably, under the cap
-hybrid's recall edge over pure vector disappears (0.816 vs 0.833 — if anything
-reversed, within noise at n≈50): part of hybrid's earlier gain came through the agent's
-extra searches, which the cap removes.
-
-Findings so far: the reranker improves retrieval but not answers (the agent compensates
-for weak rankings with more searches — under the v2 merge rule identity-vs-voyage
-recall@5 is 0.743 vs 0.793, much closer than the v1 rule suggested); the prompt converts
-retrieval into correctness — V2B ("faithful messenger for one primary article") is ~2×
-the V1 baseline. The wrong bucket barely moves (~0.06–0.14); the game is converting
-on-track into correct. Recall loss decomposition on v2b (66 gold pairs): 12% never
-retrieved by any call (2 easy under raw-question vector search — agent query
-formulation; 2 BM25-only; 2 need k>20; 2 unfindable at k=100), 12% retrieved but
-ranked 6+; ceiling recall over the full merged ranking is 0.913.
-
-Gotchas: `runs/baseline.jsonl` is the **validation** split (script default at the time)
-— zero question overlap with the train runs; don't cross-compare. deepeval aborts a
-whole scoring pass if the judge once emits invalid JSON — rerun `--rescore` on flake.
-The partial flag still overlaps correct answers (53 of 74 corrects on
-`full-articles-train` also scored partial=1 — independent LLM calls, the partial judge
-is stricter about missingness): read buckets, never the partial mean. TODO: validation
-run of the active config (V5 + full articles + voyage + hybrid) for a held-out
-baseline.
-
-**Bet 3(a) tried and rejected — `k8-articles-train` (2026-07-13): k_final 5→8 is
-not a win under the V5 prompt.** The retrieval mechanism worked exactly as
-predicted: seen-gold coverage 0.772→0.874, questions with ALL gold in tool output
-74→85 (recall@5 is computed from the full ranking and barely moved, as expected —
-`k_final` only slices tool output). But the answer layer gave it back: correct
-83→81. Only 3 flips are attributable to newly-seen gold (Q23, Q48, Q96); the 10
-losses look like context dilution — with 8 full articles the agent compresses
-steps away again (Q3, Q11), pads with tangents (Q57), or answers from a wrong-track
-extra article (Q86). One real effect: wrong 3→1 (broader coverage rescues the
-worst answers into on-track). Cost $0.066→$0.074/answer. Keep `k_final=5`; if
-revisited, pair a larger window with prompt work against big-context compression.
-Still open from Bet 3: (b) a nudge to spend the second search on the uncovered
-part of multi-part/enumerative questions (7 of 10 unseen-gold failures in
-`full-articles-train` used only 1 of 2 searches).
+TODO: validation run of the active config for a held-out baseline. Open from Bet 3:
+(b) a nudge to spend the second search on the uncovered part of multi-part/
+enumerative questions (7 of 10 unseen-gold failures in `full-articles-train` used
+only 1 of 2 searches).
 
 ## Non-goals (for now)
 
