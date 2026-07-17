@@ -9,6 +9,8 @@ from customer_agent.evaluation.scoring import (
     extract_case_results,
     per_metric_scores,
     push_annotations,
+    scope_summary,
+    split_by_behavior,
     summarize,
     write_scores,
 )
@@ -219,6 +221,19 @@ def test_build_annotations_llm_vs_code_and_skips_missing_span():
     assert recall["result"]["label"] is None
 
 
+def test_build_annotations_flag_labels_match_suffixed_metric_names():
+    """deepeval names the metric "AnswerPartiallyCorrect [GEval]"; the flag-label
+    table keys base names — matching must see through the suffix."""
+    case_results = {
+        "q0": {"AnswerPartiallyCorrect [GEval]": {
+            "score": 1.0, "success": True, "reason": "missing steps",
+            "evaluation_model": "claude-test",
+        }}
+    }
+    (annotation,) = build_annotations([RECORDS[0]], case_results)
+    assert annotation["result"]["label"] == "partial"
+
+
 def test_build_annotations_failed_judgement_labeled_fail():
     record = dict(RECORDS[1], otel_span_id="c" * 16)  # index=1 -> joins on "q1"
     annotations = build_annotations([record], {"q1": CASE_RESULTS["q1"]})
@@ -277,6 +292,67 @@ def test_summarize_tolerates_records_without_usage_fields():
     assert summary["usage"] is None
     assert summary["cost_usd"] is None
     assert summary["latency_seconds"] is None
+
+
+SCOPE_RECORDS = [
+    {
+        "index": 2,
+        "question": "sq0",
+        "actual_answer": "sa0",
+        "expected_answer": "se0",
+        "gold_article_ids": [],
+        "category": "out_of_kb",
+        "expected_behavior": "escalate_human",
+        "tool_calls": [{"query": "x", "article_ids": [], "seen_article_ids": []}],
+    },
+    {
+        "index": 3,
+        "question": "sq1",
+        "actual_answer": "sa1",
+        "expected_answer": "se1",
+        "gold_article_ids": [],
+        "category": "prompt_injection",
+        "expected_behavior": "deflect_redirect",
+        "tool_calls": [],
+    },
+]
+
+
+def test_split_by_behavior_dispatches_on_expected_behavior():
+    gray = dict(RECORDS[0], category="abusive_gray", expected_behavior="answer_normally")
+    standard, scope = split_by_behavior([gray, RECORDS[1], *SCOPE_RECORDS])
+    # Gray traps and pre-extension records (no expected_behavior field) both go standard.
+    assert [r["index"] for r in standard] == [0, 1]
+    assert [r["index"] for r in scope] == [2, 3]
+
+
+# deepeval reports GEval metrics with a " [GEval]" name suffix; fixtures mirror that.
+SCOPE_CASE_RESULTS = {
+    "q2": {"ScopeHandling [GEval]": {"score": 1.0, "success": True, "reason": "handled",
+                                     "evaluation_model": "claude-test"}},
+    "q3": {"ScopeHandling [GEval]": {"score": 0.0, "success": False, "reason": "complied",
+                                     "evaluation_model": "claude-test"}},
+}
+
+
+def test_scope_summary_rates_and_buckets():
+    summary = scope_summary(SCOPE_RECORDS, SCOPE_CASE_RESULTS)
+    assert summary["n"] == 2
+    assert summary["handled_rate"] == 0.5
+    assert summary["per_category"] == {
+        "out_of_kb": {"handled": 1, "n": 1},
+        "prompt_injection": {"handled": 0, "n": 1},
+    }
+    assert summary["avg_tool_calls"] == 0.5  # (1 + 0) / 2
+
+
+def test_scope_summary_tolerates_unscored_records():
+    """A judge flake (metric errored, score None -> skipped in extraction) must
+    not crash the block; the record still counts toward n."""
+    summary = scope_summary(SCOPE_RECORDS, {"q2": SCOPE_CASE_RESULTS["q2"]})
+    assert summary["n"] == 2
+    assert summary["handled_rate"] == 1.0
+    assert summary["per_category"] == {"out_of_kb": {"handled": 1, "n": 1}}
 
 
 def test_summarize_empty_records():

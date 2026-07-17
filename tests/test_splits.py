@@ -2,7 +2,7 @@ import pytest
 from datasets import Dataset
 
 import customer_agent.data.splits as splits_module
-from customer_agent.data.splits import get_split, train_validation_split
+from customer_agent.data.splits import get_extended_split, get_split, train_validation_split
 
 
 @pytest.fixture(autouse=True)
@@ -52,3 +52,34 @@ def test_get_split_names():
 def test_get_split_rejects_unknown_name():
     with pytest.raises(ValueError, match="Unknown split"):
         get_split("test")
+
+
+EXTENDED_ROWS = (
+    {"id": "off_topic-01", "question": "eq0", "answer": "ea0", "article_ids": [],
+     "category": "off_topic", "expected_behavior": "deflect_redirect", "split": "train"},
+    {"id": "out_of_kb-01", "question": "eq1", "answer": "ea1", "article_ids": [],
+     "category": "out_of_kb", "expected_behavior": "escalate_human", "split": "validation"},
+    {"id": "abusive_gray-01", "question": "eq2", "answer": "ea2", "article_ids": ["g1"],
+     "category": "abusive_gray", "expected_behavior": "answer_normally", "split": "train"},
+)
+
+
+@pytest.fixture
+def fake_extended(monkeypatch):
+    monkeypatch.setattr(splits_module, "load_extended", lambda: EXTENDED_ROWS)
+
+
+def test_get_extended_split_filters_on_explicit_column(fake_extended):
+    assert [r["id"] for r in get_extended_split("train")] == ["off_topic-01", "abusive_gray-01"]
+    assert [r["id"] for r in get_extended_split("validation")] == ["out_of_kb-01"]
+
+
+def test_get_extended_split_returns_copies(fake_extended):
+    # load_extended is lru_cached; mutating a returned row must not poison the cache.
+    get_extended_split("train")[0]["question"] = "mutated"
+    assert get_extended_split("train")[0]["question"] == "eq0"
+
+
+def test_get_extended_split_rejects_unknown_name(fake_extended):
+    with pytest.raises(ValueError, match="Unknown split"):
+        get_extended_split("test")

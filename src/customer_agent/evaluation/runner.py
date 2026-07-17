@@ -19,7 +19,7 @@ from customer_agent.agent.agent import build_agent
 from customer_agent.agent.prompts import PROMPT_VERSION
 from customer_agent.agent.tools import record_retrievals, search_budget
 from customer_agent.config import get_settings
-from customer_agent.data.splits import get_split
+from customer_agent.data.splits import get_extended_split, get_split
 from customer_agent.evaluation.user_simulator import get_default_simulator
 from customer_agent.pricing import answer_cost_usd
 from customer_agent.retrieval.pipeline import close_pipeline
@@ -70,6 +70,8 @@ async def _run_one(
                 "question": row["question"],
                 "expected_answer": row["answer"],
                 "gold_article_ids": list(row["article_ids"]),
+                "category": row.get("category", "standard"),
+                "expected_behavior": row.get("expected_behavior", "answer_normally"),
                 "error": f"{type(exc).__name__}: {exc}",
             }
         progress["done"] += 1
@@ -114,6 +116,9 @@ async def _run_agent(agent, tracer, settings, message: str, row: dict, index: in
         "question": row["question"],
         "expected_answer": row["answer"],
         "gold_article_ids": list(row["article_ids"]),
+        # Scope routing at scoring time; standard WixQA rows lack the columns.
+        "category": row.get("category", "standard"),
+        "expected_behavior": row.get("expected_behavior", "answer_normally"),
         "actual_answer": str(result.final_output),
         "retrieved_article_ids": merge_ranked_article_ids(
             [c["article_ids"] for c in per_call]
@@ -151,12 +156,17 @@ async def generate_run(
     subset: str | None = None,
     limit: int | None = None,
     run_id: str | None = None,
+    extended: bool = False,
 ) -> Path:
     settings = get_settings()
     run_id = run_id or f"{split_name}-{time.strftime('%Y%m%d-%H%M%S')}"
-    rows = get_split(split_name, subset)
-    if limit:
-        rows = rows.select(range(min(limit, len(rows))))
+    # The limit applies to standard rows only; extension rows are appended after
+    # it, so `--limit 0 --extended` runs exactly the split's extension rows.
+    rows = list(get_split(split_name, subset))
+    if limit is not None:
+        rows = rows[:limit]
+    if extended:
+        rows.extend(get_extended_split(split_name))
 
     agent = build_agent()
     simulator = get_default_simulator()

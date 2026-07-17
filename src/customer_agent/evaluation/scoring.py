@@ -1,7 +1,16 @@
 """Scoring phase: turn run artifacts into deepeval test cases, evaluate, aggregate.
 
 Kept separate from the CLI script so the pieces are importable and testable.
-Only score() talks to an LLM (the GEval judge); everything else is pure.
+Only score() and _score_scope() talk to an LLM (the GEval judges); everything
+else is pure.
+
+Records dispatch on expected_behavior (recorded per question by the runner;
+absent in pre-extension artifacts and defaulted to answer_normally):
+answer_normally — standard questions and gray traps — goes down the unchanged
+correctness/partial/retrieval path; everything else (out-of-scope extension
+rows) is scored by ScopeHandling ONLY and excluded from the correctness ladder
+and the retrieval-metric means (their gold is empty — retrieval metrics would
+score them 0.0 and poison the means).
 
 Per-question visibility, two sinks fed from the same extracted results:
   - runs/<id>.scores.jsonl — every metric score + the judge's reasoning per question
@@ -23,6 +32,17 @@ from customer_agent.config import get_settings
 def _case_name(record: dict, position: int) -> str:
     """Stable join key between records, deepeval test cases, and their results."""
     return f"q{record.get('index', position)}"
+
+
+def split_by_behavior(records: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(answer_normally records, scope records) — the scoring-path dispatch."""
+    standard = [
+        r for r in records if r.get("expected_behavior", "answer_normally") == "answer_normally"
+    ]
+    scope = [
+        r for r in records if r.get("expected_behavior", "answer_normally") != "answer_normally"
+    ]
+    return standard, scope
 
 
 _NO_GROUNDING_CONTEXT = (
@@ -133,6 +153,14 @@ def write_scores(
     return path
 
 
+def _metric_base_name(name: str) -> str:
+    """deepeval reports GEval metrics as e.g. "AnswerCorrectness [GEval]"; the
+    reported name is kept everywhere it is stored (scores files, summaries,
+    Phoenix annotations — renaming would break continuity with old runs), but
+    metric identity checks match on the base name."""
+    return name.split(" [")[0]
+
+
 # Not annotated on traces: per question these are just reciprocal rank / average
 # precision — they only carry meaning as means over the whole run. They stay in the
 # scores file and the summary.
@@ -162,8 +190,8 @@ def build_annotations(
             if metric_name.startswith(_RUN_LEVEL_METRIC_PREFIXES):
                 continue
             llm_judged = bool(data.get("evaluation_model"))
-            if metric_name in _FLAG_METRIC_LABELS:
-                label = _FLAG_METRIC_LABELS[metric_name][bool(data["score"])]
+            if _metric_base_name(metric_name) in _FLAG_METRIC_LABELS:
+                label = _FLAG_METRIC_LABELS[_metric_base_name(metric_name)][bool(data["score"])]
             elif llm_judged:
                 label = "pass" if data.get("success") else "fail"
             else:
@@ -234,6 +262,65 @@ def summarize(artifact: Path, records: list[dict], per_metric: dict[str, list[fl
     }
 
 
+def scope_summary(scope_records: list[dict], case_results: dict[str, dict[str, dict]]) -> dict:
+    """The scope block: overall handled-rate + per-category counts. n≈2-5 per
+    category — read as buckets, gross signal only. avg_tool_calls is informative,
+    unscored (searches burned on out-of-scope questions are waste)."""
+    scores: list[float] = []
+    per_category: dict[str, dict[str, int]] = {}
+    for i, r in enumerate(scope_records):
+        metrics = case_results.get(_case_name(r, i), {})
+        data = next(
+            (v for k, v in metrics.items() if _metric_base_name(k) == "ScopeHandling"), None
+        )
+        if data is None:
+            continue
+        scores.append(data["score"])
+        bucket = per_category.setdefault(r["category"], {"handled": 0, "n": 0})
+        bucket["n"] += 1
+        bucket["handled"] += int(data["score"])
+    return {
+        "n": len(scope_records),
+        "handled_rate": statistics.mean(scores) if scores else None,
+        "per_category": dict(sorted(per_category.items())),
+        "avg_tool_calls": (
+            statistics.mean(len(r.get("tool_calls") or []) for r in scope_records)
+            if scope_records else 0
+        ),
+    }
+
+
+def _score_scope(scope_records: list[dict]) -> dict[str, dict[str, dict]]:
+    """Evaluate ScopeHandling: one deepeval pass per (category, expected_behavior)
+    group, each with criteria assembled for that group. Case names join back into
+    the same case_results dict as the standard metrics."""
+    from deepeval import evaluate
+
+    from customer_agent.evaluation.answer_metrics import _judge_model
+    from customer_agent.evaluation.scope_metrics import make_scope_metric
+
+    model = _judge_model()
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for r in scope_records:
+        groups.setdefault((r["category"], r["expected_behavior"]), []).append(r)
+    case_results: dict[str, dict[str, dict]] = {}
+    for (category, behavior), group in groups.items():
+        cases = [
+            LLMTestCase(
+                name=_case_name(r, i),
+                input=r["question"],
+                actual_output=r["actual_answer"],
+                expected_output=r["expected_answer"],
+            )
+            for i, r in enumerate(group)
+        ]
+        result = evaluate(
+            test_cases=cases, metrics=[make_scope_metric(category, behavior, model)]
+        )
+        case_results.update(extract_case_results(result))
+    return case_results
+
+
 def score(artifact: Path) -> dict:
     """Full scoring pass: deepeval evaluate (judge LLM + deterministic metrics) ->
     per-question scores file + Phoenix annotations + summary."""
@@ -263,10 +350,14 @@ def score(artifact: Path) -> dict:
             file=sys.stderr,
         )
         records = [r for r in records if not r.get("error")]
-    metrics = [*answer_metrics(), *retrieval_metrics(settings.metric_ks)]
-    result = evaluate(test_cases=build_test_cases(records), metrics=metrics)
-
-    case_results = extract_case_results(result)
+    standard_records, scope_records = split_by_behavior(records)
+    case_results: dict[str, dict[str, dict]] = {}
+    if standard_records:
+        metrics = [*answer_metrics(), *retrieval_metrics(settings.metric_ks)]
+        result = evaluate(test_cases=build_test_cases(standard_records), metrics=metrics)
+        case_results.update(extract_case_results(result))
+    if scope_records:
+        case_results.update(_score_scope(scope_records))
     scores_path = write_scores(artifact, records, case_results)
     try:
         pushed = push_annotations(build_annotations(records, case_results),
@@ -275,7 +366,15 @@ def score(artifact: Path) -> dict:
         print(f"WARNING: could not push annotations to Phoenix: {exc}", file=sys.stderr)
         pushed = 0
 
-    summary = summarize(artifact, records, per_metric_scores(case_results))
+    per_metric = per_metric_scores(case_results)
+    # ScopeHandling means live in the scope block; the metrics dict stays the
+    # standard ladder, comparable to every historical run.
+    per_metric = {
+        name: scores for name, scores in per_metric.items()
+        if _metric_base_name(name) != "ScopeHandling"
+    }
+    summary = summarize(artifact, records, per_metric)
+    summary["scope"] = scope_summary(scope_records, case_results) if scope_records else None
     summary["scores_file"] = str(scores_path)
     summary["phoenix_annotations"] = pushed
     return summary

@@ -2,7 +2,11 @@
 
 Usage:
     uv run python scripts/run_eval.py --split validation [--subset wixqa_expertwritten]
-                                      [--limit N] [--rescore runs/<id>.jsonl]
+                                      [--limit N] [--extended] [--rescore runs/<id>.jsonl]
+
+--extended appends the split's WixQA_Extended rows (out-of-scope questions +
+gray traps) after --limit is applied to standard rows, so
+`--limit 0 --extended` runs exactly the extension rows.
 
 Two phases:
   1. generate — run the agent per question, persist runs/<run_id>.jsonl (skipped with --rescore)
@@ -39,7 +43,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--split", default="validation", choices=["train", "validation"])
     parser.add_argument("--subset", default=None, help="QA subset (default from config)")
-    parser.add_argument("--limit", type=int, default=None, help="only the first N questions")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="only the first N standard questions (0 = none)")
+    parser.add_argument("--extended", action="store_true",
+                        help="append the split's WixQA_Extended rows")
     parser.add_argument("--rescore", type=Path, default=None,
                         help="skip generation; score an existing runs/<id>.jsonl")
     parser.add_argument("--run-id", default=None)
@@ -56,7 +63,8 @@ def main() -> None:
         setup_tracing(f"eval-{run_name}")
         _quiet_connection_gc_warnings()
         artifact = asyncio.run(
-            generate_run(args.split, subset=args.subset, limit=args.limit, run_id=args.run_id)
+            generate_run(args.split, subset=args.subset, limit=args.limit,
+                         run_id=args.run_id, extended=args.extended)
         )
         print(f"generation done -> {artifact}")
 
@@ -82,6 +90,14 @@ def main() -> None:
         print(f"  latency: avg={lat['avg']:.1f}s max={lat['max']:.1f}s")
     for name, stats in summary["metrics"].items():
         print(f"  {name:<24} {stats['mean']:.3f}")
+    if summary.get("scope"):
+        s = summary["scope"]
+        rate = f"{s['handled_rate']:.2f}" if s["handled_rate"] is not None else "n/a"
+        print(f"  --- scope (out-of-scope handling, n={s['n']}, "
+              f"avg searches {s['avg_tool_calls']:.2f}) ---")
+        print(f"  {'handled_rate':<24} {rate}")
+        for category, counts in s["per_category"].items():
+            print(f"    {category:<22} {counts['handled']}/{counts['n']}")
     print(f"summary -> {summary_path}")
     print(f"per-question scores (judge reasoning) -> {summary['scores_file']}")
     if summary["phoenix_annotations"]:

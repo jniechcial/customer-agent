@@ -9,7 +9,7 @@ import random
 from datasets import Dataset
 
 from customer_agent.config import get_settings
-from customer_agent.data.wixqa import load_qa
+from customer_agent.data.wixqa import load_extended, load_qa
 
 
 def train_validation_split(subset: str | None = None) -> tuple[Dataset, Dataset]:
@@ -28,3 +28,12 @@ def get_split(name: str, subset: str | None = None) -> Dataset:
     if name == "validation":
         return validation
     raise ValueError(f"Unknown split {name!r}; expected 'train' or 'validation'")
+
+
+def get_extended_split(name: str) -> list[dict]:
+    """Extension rows for a split. Unlike the seeded standard split, extension
+    rows carry an explicit split column (stratified by category — a seeded
+    random split over n=40 can strand a whole category on one side)."""
+    if name not in ("train", "validation"):
+        raise ValueError(f"Unknown split {name!r}; expected 'train' or 'validation'")
+    return [dict(row) for row in load_extended() if row["split"] == name]

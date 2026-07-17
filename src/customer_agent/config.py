@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     qa_subset: str = "wixqa_expertwritten"
     split_seed: int = 42
     train_fraction: float = 0.5
+    # Out-of-scope extension rows (WixQA_Extended), published on HF and
+    # revision-pinned like the main dataset. Set extended_dataset_name="" to
+    # fall back to the local JSONL (scripts/build_extended.py output) while
+    # iterating on the dataset before a re-upload.
+    extended_dataset_name: str = "jniechcial/WixQA_Extended"
+    extended_dataset_revision: str | None = "06142982e61c8da8976c4ab56b310198b7a723a7"
+    extended_dataset_path: str = "extended/wixqa_extended.jsonl"
 
     # --- Chunking / indexing ---
     chunk_size_tokens: int = 512
