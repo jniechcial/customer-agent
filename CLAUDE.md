@@ -10,6 +10,7 @@ out piece by piece.
 | Decision | Choice | Rationale |
 |---|---|---|
 | Benchmark data | `wixqa_expertwritten` (200 rows) | Human-grounded, multi-article synthesis. Other subsets available behind a CLI flag. |
+| Out-of-scope extension | [`jniechcial/WixQA_Extended`](https://huggingface.co/datasets/jniechcial/WixQA_Extended) (40 rows, revision-pinned) | Hand-curated off-topic/competitor/abuse/injection/harmful/out-of-KB questions + gray over-refusal traps; scored by ScopeHandling, not the correctness ladder. `--extended` on run_eval appends them (`--limit 0 --extended` = extension rows only); `extended_dataset_name=""` falls back to `extended/wixqa_extended.jsonl`. |
 | Knowledge base | `wix_kb_corpus` (6,221 articles) | The retrieval target; indexed in full regardless of QA split. |
 | Split | Deterministic 50/50 train/validation, seed=42, computed at load time | Train for prompt/pipeline optimization, validation for eval. No committed artifact; HF dataset revision pinned in config. |
 | Agent framework | OpenAI Agents SDK | Structured agent/tool abstractions, first-class tracing hooks. |
@@ -125,9 +126,12 @@ user-simulator stub). Entry points live in `scripts/`; eval artifacts in `runs/`
 
 M0–M5 done; full KB indexed (10,081 chunks).
 
-**Active baseline: `prompt-v5-train`** — V5 prompt + full articles + Voyage + hybrid
-+ 2-search cap, judge v3, full 100-question train split: **0.83 correct / 0.14
-on-track / 0.03 wrong**, recall@5 0.820, $0.066/answer, 18 s avg latency.
+**Active baseline: `prompt-v6.2-train-extended`** — V6.2 prompt (V5 + scope
+triage + unconditional disjoint closings) + full articles + Voyage + hybrid +
+2-search cap, judge v3 + ScopeHandling v1, train `--extended` (100 standard +
+20 out-of-scope): standard **0.83 correct / 0.15 on-track / 0.02 wrong**
+(guarded: matches `prompt-v5-train` with symmetric flips), recall@5 0.825,
+**scope 0.81**, $0.054/answer, 17 s avg latency.
 
 **Per-run results live in [LOGBOOK.md](LOGBOOK.md)** — chronological, judge-v3
 scores throughout, with 🟢/🔴 deltas vs each run's comparison run. **After every
@@ -155,16 +159,25 @@ Durable findings:
   (2 easy under raw-question vector search — agent query formulation; 2 BM25-only;
   2 need k>20; 2 unfindable at k=100), 12% retrieved but ranked 6+; ceiling recall
   over the full merged ranking is 0.913.
+- **Scope handling is prompt-layer work** (WixQA_Extended, runs #12–#16): V5 →
+  V6.2 moved scope 0.375 → 0.81 with retrieval untouched, and *cut* cost (out-of-
+  scope questions skip searching). The coupled risk is over-refusal: a topic-shaped
+  escalation trigger ("refunds, billing…") cost 5 standard-correct points by
+  diverting doc-answerable policy questions (V6); wording the trigger as what the
+  docs can *decide* recovered them (V6.1), and making the closing offers
+  unconditional recovered the scope losses that caused (V6.2). Escalation/
+  deflection closings must stay disjoint: Customer Care only for Wix
+  account/money/responsibility matters, never for off-Wix deflections.
 
 Gotchas: deepeval
 aborts a whole scoring pass if the judge once emits invalid JSON — rerun `--rescore`
 on flake. The partial flag overlaps correct answers (independent LLM calls, the
 partial judge is stricter about missingness): read buckets, never the partial mean.
 
-TODO: validation run of the active config for a held-out baseline. Open from Bet 3:
-(b) a nudge to spend the second search on the uncovered part of multi-part/
-enumerative questions (7 of 10 unseen-gold failures in `full-articles-train` used
-only 1 of 2 searches).
+TODO: validation run of the active config (`validation --extended`) for a held-out
+baseline (explicitly deferred on 2026-07-17). Open from Bet 3: (b) a nudge to
+spend the second search on the uncovered part of multi-part/enumerative questions
+(7 of 10 unseen-gold failures in `full-articles-train` used only 1 of 2 searches).
 
 ## Non-goals (for now)
 
@@ -182,6 +195,14 @@ these; they're intentionally not built.
   (The former gold-only-grounding question is resolved by judge v3.)
 - The two judge flags could collapse into one 3-class call (correct/on-track/wrong):
   removes the overlap inconsistency and halves judge cost.
+- ScopeHandling criteria v1.1 candidates (2 of V6.2's 3 scope misses are judge-,
+  not agent-side): the scope judge sees no retrieval context, so grounded
+  specifics in scope answers score as invented; and silently ignoring an
+  injection while answering the legitimate part scores as a miss though it is
+  arguably ideal. Also: the pelican `off_topic` trap reads as a legitimate
+  Custom Element question (0/4 runs) — reword or reclassify the dataset item.
+  And OpenAI's moderation API-blocks the phishing `harmful_use` question in
+  most runs (`cyber_policy`) — that category's n is unstable by design.
 - Statistical rigor (bootstrap CIs, paired tests) — the baseline is n=100 now, but
   cross-run deltas of a few points are still inside judge noise (~10/49 questions
   flipped buckets between two runs of near-identical configs); add when experiments
