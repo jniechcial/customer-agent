@@ -2,6 +2,7 @@
 
 import weaviate
 from weaviate.classes.config import Configure, DataType, Property
+from weaviate.config import AdditionalConfig
 
 from customer_agent.config import get_settings
 from customer_agent.data.wixqa import load_kb
@@ -15,6 +16,8 @@ def connect() -> weaviate.WeaviateClient:
         host=settings.weaviate_http_host,
         port=settings.weaviate_http_port,
         grpc_port=settings.weaviate_grpc_port,
+        additional_config=AdditionalConfig(trust_env=True),
+        skip_init_checks=True,
     )
 
 
