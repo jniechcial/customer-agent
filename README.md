@@ -54,6 +54,10 @@ the retrieval recorder (including concurrent-question isolation), the generation
 runner and its JSONL artifacts, scoring aggregation, and the tool contract
 (name/schema/invocation). Runs without `.env` present, so it's CI-ready.
 
+## Sandboxed agent runs
+
+PRs labelled `agent/*` are opened by Claude Code running inside an isolated OpenShell sandbox with no persistent state and network access restricted to this repository only. They represent autonomous, headless changes — assumptions made during the run are documented in the PR body.
+
 ## Experimentation surfaces
 
 - `retrieval/reranker.py` — reranking stage (stub; identity passthrough)
