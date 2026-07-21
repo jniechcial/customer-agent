@@ -90,6 +90,7 @@ def main() -> None:
                     result = Runner.run_sync(agent, turn_input)
             conversation = result.to_input_list()
             console.print()
+            console.print("[bold green]agent>[/bold green]")
             console.print(Markdown(str(result.final_output)))
             console.print()
     finally:
