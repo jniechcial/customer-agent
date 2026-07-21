@@ -77,8 +77,16 @@ session), `--max-calls` (hard cap on the project's LLM calls, default 60) or
 the stack, `--keep-phoenix` to keep traces after the run, and `--dry-run` to render the policy
 and prompt without launching.
 
-Prerequisites: the OpenShell CLI with a running local gateway, Docker, `gh auth login`, and a
-seed image built once with `scripts/build-weaviate-seed`.
+One-time setup — the OpenShell CLI with a running local gateway, Docker, `gh auth login`, then:
+
+```bash
+scripts/build-weaviate-seed                  # bake the current KB index into a seed image
+openshell provider create --name run-agent-claude --type claude --from-existing
+openshell provider create --name run-agent-github --type github --credential GITHUB_TOKEN
+```
+
+Providers inject credentials into the sandbox as env vars only, never as files. Rebuild the
+seed image after re-indexing the KB.
 
 ### Architecture
 
@@ -105,6 +113,7 @@ runs automatically on every launch) sweeps any run whose supervisor died. Run st
 `runs/agent/<run-id>/`.
 
 The exact grants live in `scripts/run-agent-payload/policy.template.yaml`, rendered per run.
+Design notes, measurements and known gaps: [plans/OPENSHELL.md](plans/OPENSHELL.md).
 
 ## Experimentation surfaces
 
