@@ -1,0 +1,204 @@
+# Sandbox policy for run-agent. Rendered per run: __ORG__ / __REPO__ are substituted
+# by scripts/run-agent before `openshell sandbox create --policy`.
+#
+# Derived from the base image's default policy (`openshell sandbox get <n> --policy-only`),
+# with three changes:
+#   1. Agent blocks we do not use are dropped (codex, copilot, cursor, opencode,
+#      nvidia_inference, vscode). The copilot block in particular grants broad
+#      github.com access, which would undermine the single-repo containment below.
+#   2. github_ssh_over_https (fetch-only, any repo) -> github_git (fetch AND push, one repo).
+#   3. github_rest_api (read-only) -> github_api (read-write, one repo, plus GraphQL for gh).
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+  - /usr
+  - /lib
+  - /proc
+  - /dev/urandom
+  - /app
+  - /etc
+  - /var/log
+  read_write:
+  - /sandbox
+  - /tmp
+  - /dev/null
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+
+  # Claude Code <-> Anthropic. Verbatim from the default policy.
+  claude_code:
+    name: claude-code
+    endpoints:
+    - host: api.anthropic.com
+      port: 443
+      protocol: rest
+      tls: terminate
+      enforcement: enforce
+      access: full
+    - host: statsig.anthropic.com
+      port: 443
+    - host: sentry.io
+      port: 443
+    - host: raw.githubusercontent.com
+      port: 443
+    - host: platform.claude.com
+      port: 443
+    binaries:
+    - path: /usr/local/bin/claude
+    - path: /usr/bin/node
+
+  # Git Smart HTTP, scoped to one repository: clone, fetch, and push.
+  # git-receive-pack is the push half and is what the default policy withholds.
+  github_git:
+    name: github-git
+    endpoints:
+    - host: github.com
+      port: 443
+      protocol: rest
+      tls: terminate
+      enforcement: enforce
+      rules:
+      - allow:
+          method: GET
+          path: /__ORG__/__REPO__.git/info/refs*
+      - allow:
+          method: POST
+          path: /__ORG__/__REPO__.git/git-upload-pack
+      - allow:
+          method: POST
+          path: /__ORG__/__REPO__.git/git-receive-pack
+    binaries:
+    - path: /usr/bin/git
+
+  # GitHub REST + GraphQL, scoped to one repository. `gh pr create` needs
+  # POST /repos/<org>/<repo>/pulls; `gh` probes GET /user to resolve the actor.
+  github_api:
+    name: github-api
+    endpoints:
+    - host: api.github.com
+      port: 443
+      protocol: rest
+      tls: terminate
+      enforcement: enforce
+      rules:
+      - allow:
+          method: "*"
+          path: /repos/__ORG__/__REPO__/**
+      - allow:
+          method: GET
+          path: /user
+    - host: api.github.com
+      port: 443
+      path: /graphql
+      protocol: graphql
+      tls: terminate
+      enforcement: enforce
+      rules:
+      - allow:
+          operation_type: query
+      - allow:
+          operation_type: mutation
+          fields: [createPullRequest, addComment]
+      deny_rules:
+      - operation_type: mutation
+        fields: [deleteRepository, deleteRef, updateBranchProtectionRule]
+    binaries:
+    - path: /usr/local/bin/claude
+    - path: /usr/bin/gh
+    - path: /usr/bin/git
+    - path: /usr/bin/curl
+
+  # Per-run dev environment: Weaviate, Phoenix and the metered LLM proxy, all
+  # running as sidecar containers on the gateway's bridge network. The sandbox
+  # proxy blocks RFC1918 by default; `allowed_ips` is the documented escape
+  # hatch. Loopback and link-local stay blocked regardless, which is why these
+  # are reached by container name rather than host.docker.internal.
+  #
+  # __BRIDGE_CIDR__ is substituted at render time from
+  #   docker network inspect openshell-docker -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+  dev_services:
+    name: dev-services
+    endpoints:
+    - port: 8080          # weaviate REST
+      allowed_ips: ["__BRIDGE_CIDR__"]
+    - port: 50051         # weaviate gRPC
+      allowed_ips: ["__BRIDGE_CIDR__"]
+    - port: 6006          # phoenix UI + OTLP HTTP collector
+      allowed_ips: ["__BRIDGE_CIDR__"]
+    - port: 4000          # llm-budget metered proxy
+      allowed_ips: ["__BRIDGE_CIDR__"]
+    binaries:
+    - path: /sandbox/repo/.venv/bin/python
+    - path: /sandbox/repo/.venv/bin/python3
+    - path: /sandbox/.uv/python/**
+    - path: /usr/bin/curl   # diagnostics from inside the sandbox
+    - path: /usr/bin/wget
+
+  # Voyage reranker. The voyageai SDK takes an explicit api_key and offers no
+  # base-URL override, so this one call path goes direct rather than through the
+  # metered proxy. Reranking is cheap and is not the token-burn risk; the real
+  # VOYAGE_API_KEY does land in the sandbox as a result.
+  voyage:
+    name: voyage
+    endpoints:
+    - host: api.voyageai.com
+      port: 443
+    binaries:
+    - path: /sandbox/repo/.venv/bin/python
+    - path: /sandbox/repo/.venv/bin/python3
+    - path: /sandbox/.uv/python/**
+
+  # HuggingFace: the eval datasets (WixQA + WixQA_Extended) load at runtime.
+  # Large files are served from CDN and Xet hosts, not huggingface.co itself.
+  huggingface:
+    name: huggingface
+    endpoints:
+    - host: huggingface.co
+      port: 443
+    - host: cdn-lfs.huggingface.co
+      port: 443
+    - host: "**.hf.co"
+      port: 443
+    - host: "**.xethub.hf.co"
+      port: 443
+    binaries:
+    - path: /sandbox/repo/.venv/bin/python
+    - path: /sandbox/repo/.venv/bin/python3
+    - path: /sandbox/.uv/python/**
+    - path: /usr/bin/curl
+
+  # Python toolchain. Extended with /sandbox/repo/.venv (the clone target)
+  # on top of the default policy's paths.
+  pypi:
+    name: pypi
+    endpoints:
+    - host: pypi.org
+      port: 443
+    - host: files.pythonhosted.org
+      port: 443
+    - host: github.com
+      port: 443
+    - host: objects.githubusercontent.com
+      port: 443
+    - host: api.github.com
+      port: 443
+    - host: downloads.python.org
+      port: 443
+    binaries:
+    - path: /sandbox/.venv/bin/python
+    - path: /sandbox/.venv/bin/python3
+    - path: /sandbox/.venv/bin/pip
+    - path: /sandbox/repo/.venv/bin/python
+    - path: /sandbox/repo/.venv/bin/python3
+    - path: /sandbox/repo/.venv/bin/pip
+    - path: /usr/local/bin/uv
+    - path: /sandbox/.uv/python/**

@@ -1,0 +1,452 @@
+#!/usr/bin/env bash
+# run-agent — fire-and-forget sandboxed coding agent that opens a PR.
+#
+#   run-agent --prompt "Change the chat.py UI so agent answers are labelled 'agent>'"
+#   run-agent status
+#   run-agent logs <run-id> -f
+#   run-agent cancel <run-id>
+#   run-agent gc
+#
+# The front door returns your terminal as soon as the run is launched. A
+# detached supervisor owns the run from there: it blocks on the sandbox, then
+# tears down the sandbox and every sidecar it created.
+#
+# Why a supervisor rather than a trap: `--no-keep` is enforced by the OpenShell
+# CLI *client*, not the gateway. Kill the client and the sandbox stays Ready
+# forever (measured). So something must outlive the invoking shell, and
+# whatever that is can also be SIGKILLed — hence `gc`, which sweeps any run
+# whose supervisor is no longer alive. Every teardown path is idempotent.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PAYLOAD_SRC="${REPO_ROOT}/scripts/run-agent-payload"
+STATE_ROOT="${REPO_ROOT}/runs/agent"
+LABEL_MANAGED="run-agent.managed=1"
+
+log()  { printf '\033[36m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m warn\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[31merror\033[0m %s\n' "$*" >&2; exit 1; }
+
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 not found on PATH"; }
+
+# ---------------------------------------------------------------- state ----
+
+state_dir()  { echo "${STATE_ROOT}/$1"; }
+status_file() { echo "$(state_dir "$1")/status.json"; }
+
+write_status() {
+    # write_status <runid> <key=value>...
+    local runid="$1"; shift
+    local dir; dir="$(state_dir "$runid")"
+    mkdir -p "$dir"
+    python3 - "$(status_file "$runid")" "$@" <<'PY'
+import json, os, sys
+path, pairs = sys.argv[1], sys.argv[2:]
+data = {}
+if os.path.exists(path):
+    try:
+        data = json.load(open(path))
+    except Exception:
+        data = {}
+for pair in pairs:
+    k, _, v = pair.partition("=")
+    data[k] = v
+json.dump(data, open(path, "w"), indent=2)
+PY
+}
+
+read_status() {
+    # read_status <runid> <key>
+    python3 - "$(status_file "$1")" "$2" <<'PY'
+import json, os, sys
+path, key = sys.argv[1], sys.argv[2]
+if not os.path.exists(path):
+    sys.exit(0)
+try:
+    print(json.load(open(path)).get(key, "") or "")
+except Exception:
+    pass
+PY
+}
+
+# ------------------------------------------------------------- teardown ----
+
+teardown_run() {
+    # teardown_run <runid> [keep_phoenix]. Idempotent by construction.
+    local runid="$1" keep_phoenix="${2:-0}"
+    local sandbox="run-agent-${runid}"
+
+    openshell sandbox delete "$sandbox" >/dev/null 2>&1 || true
+
+    local ids
+    ids="$(docker ps -aq --filter "label=run-agent.runid=${runid}" 2>/dev/null || true)"
+    for cid in $ids; do
+        local name
+        name="$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null | sed 's|^/||')"
+        if [[ "$keep_phoenix" == 1 && "$name" == phoenix-* ]]; then
+            continue
+        fi
+        docker rm -f "$cid" >/dev/null 2>&1 || true
+    done
+}
+
+supervisor_alive() {
+    local pid; pid="$(read_status "$1" supervisor_pid)"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+cmd_gc() {
+    local swept=0
+    mkdir -p "$STATE_ROOT"
+    for dir in "$STATE_ROOT"/*/; do
+        [[ -d "$dir" ]] || continue
+        local runid; runid="$(basename "$dir")"
+        local state; state="$(read_status "$runid" state)"
+        case "$state" in
+            done|failed|cancelled) continue ;;
+        esac
+        # An empty state means the launcher died before registering the run —
+        # still sweepable, and its containers may already exist.
+        if supervisor_alive "$runid"; then continue; fi
+        warn "run ${runid} is '${state:-unregistered}' but its supervisor is gone — sweeping"
+        teardown_run "$runid"
+        write_status "$runid" state=failed detail="supervisor died; swept by gc" \
+                     finished_at="$(date -u +%FT%TZ)"
+        swept=$((swept + 1))
+    done
+
+    # Containers we own whose run directory no longer exists at all.
+    local ids; ids="$(docker ps -aq --filter "label=${LABEL_MANAGED}" 2>/dev/null || true)"
+    for cid in $ids; do
+        local rid
+        rid="$(docker inspect -f '{{index .Config.Labels "run-agent.runid"}}' "$cid" 2>/dev/null || true)"
+        [[ -n "$rid" && ! -d "$(state_dir "$rid")" ]] || continue
+        warn "container ${cid:0:12} belongs to unknown run ${rid} — removing"
+        docker rm -f "$cid" >/dev/null 2>&1 || true
+        swept=$((swept + 1))
+    done
+
+    [[ "$swept" == 0 ]] && log "nothing to collect" || log "swept ${swept} item(s)"
+}
+
+# ----------------------------------------------------------- supervisor ----
+
+cmd_worker() {
+    # Detached. stdout/stderr already point at the run log.
+    local runid="$1"
+    local dir; dir="$(state_dir "$runid")"
+    # shellcheck disable=SC1090
+    source "${dir}/meta.env"
+
+    local sandbox="run-agent-${runid}"
+    local rc=0
+
+    finish() {
+        local rc_in=$?
+        local pr_url="" calls=""
+        pr_url="$(grep -a -o '^PR_URL=.*' "${dir}/run.log" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+        if [[ "$NO_SERVICES" != 1 ]]; then
+            calls="$(docker run --rm --network "$DOCKER_NETWORK" curlimages/curl:latest \
+                        -s --max-time 10 "http://llm-budget-${runid}:4000/_budget" 2>/dev/null || true)"
+        fi
+        write_status "$runid" \
+            state="$([[ "$rc_in" == 0 && -n "$pr_url" ]] && echo done || echo failed)" \
+            exit_code="$rc_in" pr_url="$pr_url" budget="${calls}" \
+            finished_at="$(date -u +%FT%TZ)"
+        echo "run-agent: tearing down (rc=${rc_in}, pr=${pr_url:-none})"
+        teardown_run "$runid" "$KEEP_PHOENIX"
+        echo "run-agent: teardown complete"
+    }
+    trap finish EXIT
+    trap 'exit 143' TERM INT HUP
+
+    write_status "$runid" state=running started_at="$(date -u +%FT%TZ)"
+
+    if [[ "$NO_SERVICES" != 1 ]]; then
+        wait_sidecars "$runid" || exit 1
+    fi
+
+    local extra=()
+    [[ "$NO_SERVICES" != 1 ]] && extra+=(
+        --env "WEAVIATE_HOST=weaviate-${runid}"
+        --env "PHOENIX_ENDPOINT=http://phoenix-${runid}:6006/v1/traces"
+        --env "OPENAI_BASE_URL=http://llm-budget-${runid}:4000/openai/v1"
+        --env "VOYAGE_API_KEY=${VOYAGE_API_KEY:-}"
+        --env "RUN_TOKEN=${RUN_TOKEN}"
+    )
+    [[ "$KEEP" == 1 ]] || extra+=(--no-keep)
+
+    openshell sandbox create --name "$sandbox" --from base \
+        --provider run-agent-claude --provider run-agent-github \
+        --policy "${dir}/policy.yaml" \
+        --upload "${dir}/payload:/sandbox" --no-git-ignore \
+        --cpu "$CPU" --memory "$MEMORY" \
+        --env "REPO=${TARGET_REPO}" --env "BRANCH=${BRANCH}" --env "BASE=${BASE}" \
+        --env "AGENT_MODEL=${MODEL}" --env "AGENT_BUDGET=${AGENT_BUDGET}" \
+        --env "WALL_CLOCK=${WALL_CLOCK}" \
+        --no-auto-providers --no-tty \
+        -- bash /sandbox/payload/entrypoint.sh || rc=$?
+
+    exit "$rc"
+}
+
+# --------------------------------------------------------------- launch ----
+
+free_port() {
+    local port="$1"
+    while lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; do port=$((port + 1)); done
+    echo "$port"
+}
+
+start_sidecars() {
+    local runid="$1" phoenix_port="$2"
+    local net="$DOCKER_NETWORK"
+
+    docker run -d --name "weaviate-${runid}" --network "$net" \
+        --label "$LABEL_MANAGED" --label "run-agent.runid=${runid}" \
+        "$SEED_IMAGE" >/dev/null
+
+    docker run -d --name "phoenix-${runid}" --network "$net" \
+        -p "${phoenix_port}:6006" -e PHOENIX_WORKING_DIR=/mnt/data \
+        --label "$LABEL_MANAGED" --label "run-agent.runid=${runid}" \
+        arizephoenix/phoenix:latest >/dev/null
+
+    docker run -d --name "llm-budget-${runid}" --network "$net" \
+        -e "MAX_CALLS=${MAX_CALLS}" \
+        -e "RUN_TOKEN=${RUN_TOKEN}" \
+        -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
+        -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
+        -e "VOYAGE_API_KEY=${VOYAGE_API_KEY:-}" \
+        -v "${PAYLOAD_SRC}/llm-budget/proxy.py:/proxy.py:ro" \
+        --label "$LABEL_MANAGED" --label "run-agent.runid=${runid}" \
+        python:3.12-alpine python /proxy.py >/dev/null
+
+}
+
+# Readiness is the supervisor's problem, not the caller's: `docker run` failures
+# (name clash, missing image) surface immediately above, while a slow Weaviate
+# boot must not hold the terminal hostage.
+wait_sidecars() {
+    local runid="$1"
+    for _ in $(seq 1 90); do
+        if docker exec "weaviate-${runid}" wget -qO- http://localhost:8080/v1/.well-known/ready >/dev/null 2>&1; then
+            echo "run-agent: sidecars ready"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "run-agent: sidecars did not become ready in 90s" >&2
+    return 1
+}
+
+cmd_run() {
+    local prompt="" target_repo="" base="main" branch="" model="sonnet"
+    local agent_budget="3.00" max_calls="60" wall_clock="45m"
+    local keep=0 keep_phoenix=0 no_services=0 dry_run=0 cpu="2" memory="4Gi"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --prompt)        prompt="$2"; shift 2 ;;
+            --repo)          target_repo="$2"; shift 2 ;;
+            --base)          base="$2"; shift 2 ;;
+            --branch)        branch="$2"; shift 2 ;;
+            --model)         model="$2"; shift 2 ;;
+            --agent-budget)  agent_budget="$2"; shift 2 ;;
+            --max-calls)     max_calls="$2"; shift 2 ;;
+            --unlimited-calls) max_calls=0; shift ;;
+            --timeout)       wall_clock="$2"; shift 2 ;;
+            --cpu)           cpu="$2"; shift 2 ;;
+            --memory)        memory="$2"; shift 2 ;;
+            --keep)          keep=1; shift ;;
+            --keep-phoenix)  keep_phoenix=1; shift ;;
+            --no-services)   no_services=1; shift ;;
+            --dry-run)       dry_run=1; shift ;;
+            *) die "unknown flag: $1" ;;
+        esac
+    done
+
+    [[ -n "$prompt" ]] || die "--prompt is required"
+
+    need openshell; need docker; need git; need python3
+    openshell status >/dev/null 2>&1 || die "openshell gateway unreachable (brew services restart openshell)"
+    docker info >/dev/null 2>&1 || die "docker is not running"
+
+    if [[ -z "$target_repo" ]]; then
+        local origin; origin="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+        target_repo="$(sed -E 's#^(git@github.com:|https://github.com/)##; s#\.git$##' <<<"$origin")"
+        [[ -n "$target_repo" ]] || die "could not infer --repo from origin"
+    fi
+    local org="${target_repo%%/*}" name="${target_repo##*/}"
+
+    # Credentials: .env for API keys, gh for the GitHub token.
+    if [[ -f "${REPO_ROOT}/.env" ]]; then set -a; . "${REPO_ROOT}/.env"; set +a; fi
+    : "${GITHUB_TOKEN:=${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}}"
+    [[ -n "${GITHUB_TOKEN}" ]] || die "no GitHub token (gh auth login, or export GITHUB_TOKEN)"
+    [[ -n "${ANTHROPIC_API_KEY:-}" ]] || die "ANTHROPIC_API_KEY not set (.env or environment)"
+
+    DOCKER_NETWORK="${DOCKER_NETWORK:-openshell-docker}"
+    local cidr
+    cidr="$(docker network inspect "$DOCKER_NETWORK" -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || true)"
+    [[ -n "$cidr" ]] || die "docker network '${DOCKER_NETWORK}' not found — is the openshell gateway running?"
+
+    SEED_IMAGE="${SEED_IMAGE:-$(docker images --format '{{.Repository}}:{{.Tag}}' \
+        | grep '^customer-agent/weaviate-kb:' | head -1)}"
+    if [[ "$no_services" != 1 && -z "$SEED_IMAGE" ]]; then
+        die "no seed image found — run scripts/build-weaviate-seed (or pass --no-services)"
+    fi
+
+    cmd_gc >/dev/null 2>&1 || true
+
+    # Globals the sidecar helpers read. A per-run token scopes the metered proxy
+    # to this run's sandbox; 0 calls means the cap is off.
+    MAX_CALLS="$max_calls"
+    RUN_TOKEN="$(openssl rand -hex 16)"
+    if [[ "$max_calls" == 0 ]]; then
+        warn "LLM call cap DISABLED for this run (--unlimited-calls)"
+    fi
+
+    local runid="$(date +%Y%m%d-%H%M%S)-$RANDOM"
+    local dir; dir="$(state_dir "$runid")"
+    mkdir -p "${dir}/payload"
+    [[ -n "$branch" ]] || branch="agent/${runid}"
+
+    sed -e "s/__ORG__/${org}/g" -e "s/__REPO__/${name}/g" -e "s#__BRIDGE_CIDR__#${cidr}#g" \
+        "${PAYLOAD_SRC}/policy.template.yaml" > "${dir}/policy.yaml"
+    cp "${PAYLOAD_SRC}/entrypoint.sh" "${dir}/payload/entrypoint.sh"
+
+    local envnote budgetnote
+    if [[ "$max_calls" == 0 ]]; then
+        budgetnote="There is no hard cap on LLM calls for this run, so spend deliberately: prefer the smallest eval that answers the question, and never re-run a large batch just to confirm a result you already have."
+    else
+        budgetnote="All OpenAI calls go through a metered proxy with a HARD CAP of ${max_calls} calls for this entire run, enforced outside the sandbox: past it you get HTTP 429 and cannot retry around it, so never run large batches."
+    fi
+    if [[ "$no_services" == 1 ]]; then
+        envnote="No project services are running in this sandbox: no Weaviate, no Phoenix, no metered LLM route. Do not attempt to run scripts/run_eval.py or scripts/index_kb.py."
+    else
+        envnote="This sandbox has a complete dev environment. A private Weaviate at \`weaviate-${runid}:8080\` is ALREADY INDEXED with the full KB — never re-index it, \`scripts/index_kb.py\` is off limits. A private Phoenix collector is at \`phoenix-${runid}:6006\` and tracing is wired. A \`.env\` has been written for you; run things with \`uv run\`. ${budgetnote} If you run anything that calls Anthropic (the eval judge), first \`export ANTHROPIC_BASE_URL=http://llm-budget-${runid}:4000/anthropic\`. Note that all network egress is via an HTTP proxy: an SDK that ignores proxy env vars (httpx \`trust_env=False\`) cannot reach even the local sidecars."
+    fi
+
+    python3 - "${dir}/payload/task.md" "${PAYLOAD_SRC}/task.md.template" \
+             "$prompt" "$envnote" "$target_repo" "$branch" "$base" <<'PY'
+import sys
+out, tpl, prompt, envnote, repo, branch, base = sys.argv[1:8]
+t = open(tpl).read()
+for k, v in (("__PROMPT__", prompt), ("__ENVIRONMENT__", envnote),
+             ("__REPO__", repo), ("__BRANCH__", branch), ("__BASE__", base)):
+    t = t.replace(k, v)
+open(out, "w").write(t)
+PY
+
+    local phoenix_port=""
+    if [[ "$no_services" != 1 ]]; then phoenix_port="$(free_port 6100)"; fi
+
+    cat > "${dir}/meta.env" <<EOF
+TARGET_REPO=${target_repo}
+BRANCH=${branch}
+BASE=${base}
+MODEL=${model}
+AGENT_BUDGET=${agent_budget}
+MAX_CALLS=${max_calls}
+RUN_TOKEN=${RUN_TOKEN}
+WALL_CLOCK=${wall_clock}
+CPU=${cpu}
+MEMORY=${memory}
+KEEP=${keep}
+KEEP_PHOENIX=${keep_phoenix}
+NO_SERVICES=${no_services}
+DOCKER_NETWORK=${DOCKER_NETWORK}
+EOF
+
+    if [[ "$dry_run" == 1 ]]; then
+        log "dry run — prepared ${dir}"
+        log "policy:  ${dir}/policy.yaml"
+        log "task:    ${dir}/payload/task.md"
+        return 0
+    fi
+
+    if [[ "$no_services" != 1 ]]; then
+        log "starting sidecars (weaviate/phoenix/llm-budget) for ${runid}"
+        start_sidecars "$runid" "$phoenix_port"
+    fi
+
+    write_status "$runid" state=starting run_id="$runid" repo="$target_repo" \
+        branch="$branch" base="$base" model="$model" \
+        phoenix_url="${phoenix_port:+http://localhost:${phoenix_port}}" \
+        prompt="$prompt" created_at="$(date -u +%FT%TZ)"
+
+    # Detach. The supervisor inherits the credentials it needs from this env.
+    export GITHUB_TOKEN OPENAI_API_KEY ANTHROPIC_API_KEY VOYAGE_API_KEY
+    export DOCKER_NETWORK
+    nohup "$0" __worker "$runid" >> "${dir}/run.log" 2>&1 &
+    local sup_pid=$!
+    write_status "$runid" supervisor_pid="$sup_pid"
+
+    log "run ${runid} launched (supervisor pid ${sup_pid})"
+    echo "  repo     ${target_repo}  branch ${branch}"
+    [[ -n "$phoenix_port" ]] && echo "  phoenix  http://localhost:${phoenix_port}"
+    echo "  log      runs/agent/${runid}/run.log"
+    echo "  status   scripts/run-agent status ${runid}"
+    echo
+    echo "Running in the background. It cleans up after itself when it finishes."
+}
+
+# --------------------------------------------------------------- queries ----
+
+cmd_status() {
+    mkdir -p "$STATE_ROOT"
+    if [[ $# -ge 1 ]]; then
+        cat "$(status_file "$1")" 2>/dev/null || die "unknown run: $1"
+        return
+    fi
+    printf '%-24s %-10s %-8s %s\n' RUN STATE ALIVE PR
+    for dir in "$STATE_ROOT"/*/; do
+        [[ -d "$dir" ]] || continue
+        local runid; runid="$(basename "$dir")"
+        local state; state="$(read_status "$runid" state)"
+        local pr;    pr="$(read_status "$runid" pr_url)"
+        local alive="-"
+        case "$state" in
+            starting|running) supervisor_alive "$runid" && alive="yes" || alive="NO" ;;
+        esac
+        printf '%-24s %-10s %-8s %s\n' "$runid" "${state:-?}" "$alive" "${pr:--}"
+    done
+}
+
+cmd_logs() {
+    [[ $# -ge 1 ]] || die "usage: run-agent logs <run-id> [-f]"
+    local f="${2:-}"
+    local path; path="$(state_dir "$1")/run.log"
+    [[ -f "$path" ]] || die "no log for run $1"
+    if [[ "$f" == "-f" ]]; then tail -f "$path"; else cat "$path"; fi
+}
+
+cmd_cancel() {
+    [[ $# -ge 1 ]] || die "usage: run-agent cancel <run-id>"
+    local runid="$1"
+    local pid; pid="$(read_status "$runid" supervisor_pid)"
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    sleep 2
+    teardown_run "$runid"
+    write_status "$runid" state=cancelled finished_at="$(date -u +%FT%TZ)"
+    log "cancelled ${runid}"
+}
+
+usage() {
+    sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+main() {
+    [[ $# -ge 1 ]] || { usage; exit 1; }
+    case "$1" in
+        __worker) shift; cmd_worker "$@" ;;
+        status)   shift; cmd_status "$@" ;;
+        logs)     shift; cmd_logs "$@" ;;
+        cancel)   shift; cmd_cancel "$@" ;;
+        gc)       shift; cmd_gc "$@" ;;
+        -h|--help) usage ;;
+        *)        cmd_run "$@" ;;
+    esac
+}
+
+main "$@"
