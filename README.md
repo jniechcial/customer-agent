@@ -2,7 +2,7 @@
 
 Customer support agent engine — a Python experimentation platform for RAG agents,
 benchmarked on [Wix/WixQA](https://huggingface.co/datasets/Wix/WixQA). See `CLAUDE.md`
-for architecture and design decisions.
+for architecture and design decisions. This is an experimentation platform and is not production-ready.
 
 ## Setup
 
