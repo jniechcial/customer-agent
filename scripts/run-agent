@@ -167,16 +167,21 @@ cmd_worker() {
         wait_sidecars "$runid" || exit 1
     fi
 
+    # `if`, not `test && extra+=(...)`: a false test as a bare compound returns 1
+    # and `set -e` would kill the supervisor before it creates the sandbox.
     local extra=()
-    [[ "$NO_SERVICES" != 1 ]] && extra+=(
-        --env "WEAVIATE_HOST=weaviate-${runid}"
-        --env "PHOENIX_ENDPOINT=http://phoenix-${runid}:6006/v1/traces"
-        --env "OPENAI_BASE_URL=http://llm-budget-${runid}:4000/openai/v1"
-        --env "VOYAGE_API_KEY=${VOYAGE_API_KEY:-}"
-        --env "RUN_TOKEN=${RUN_TOKEN}"
-    )
+    if [[ "$NO_SERVICES" != 1 ]]; then
+        extra+=(
+            --env "WEAVIATE_HOST=weaviate-${runid}"
+            --env "PHOENIX_ENDPOINT=http://phoenix-${runid}:6006/v1/traces"
+            --env "OPENAI_BASE_URL=http://llm-budget-${runid}:4000/openai/v1"
+            --env "VOYAGE_API_KEY=${VOYAGE_API_KEY:-}"
+            --env "RUN_TOKEN=${RUN_TOKEN}"
+        )
+    fi
     [[ "$KEEP" == 1 ]] || extra+=(--no-keep)
 
+    # ${extra[@]+...} so an empty array does not trip `set -u` on bash 3.2.
     openshell sandbox create --name "$sandbox" --from base \
         --provider run-agent-claude --provider run-agent-github \
         --policy "${dir}/policy.yaml" \
@@ -185,6 +190,7 @@ cmd_worker() {
         --env "REPO=${TARGET_REPO}" --env "BRANCH=${BRANCH}" --env "BASE=${BASE}" \
         --env "AGENT_MODEL=${MODEL}" --env "AGENT_BUDGET=${AGENT_BUDGET}" \
         --env "WALL_CLOCK=${WALL_CLOCK}" \
+        ${extra[@]+"${extra[@]}"} \
         --no-auto-providers --no-tty \
         -- bash /sandbox/payload/entrypoint.sh || rc=$?
 
