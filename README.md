@@ -56,7 +56,71 @@ runner and its JSONL artifacts, scoring aggregation, and the tool contract
 
 ## Sandboxed agent runs
 
-PRs labelled `agent/*` are opened by Claude Code running inside an isolated OpenShell sandbox with no persistent state and network access restricted to this repository only. They represent autonomous, headless changes — assumptions made during the run are documented in the PR body.
+PRs on `agent/*` branches are opened by Claude Code running headless inside an isolated
+[OpenShell](https://github.com/NVIDIA/openshell) sandbox. `scripts/run-agent` launches one and
+hands your terminal straight back — the run continues in the background and cleans up after
+itself. Assumptions made during a run are documented in the PR body.
+
+```bash
+# Fire and forget. Prints a run id, a Phoenix URL, and returns in ~1s.
+scripts/run-agent --prompt "Make chat.py label agent answers as 'agent>' in a distinct colour"
+
+scripts/run-agent status              # all runs: state, supervisor alive?, PR link
+scripts/run-agent logs <run-id> -f    # follow the agent's transcript
+scripts/run-agent cancel <run-id>     # kill a run and tear everything down
+scripts/run-agent gc                  # sweep anything a crashed run left behind
+```
+
+Useful flags: `--model` (default `sonnet`), `--agent-budget` (dollar cap on the agent's own
+session), `--max-calls` (hard cap on the project's LLM calls, default 60) or
+`--unlimited-calls` to turn that cap off, `--no-services` for doc/UI changes that don't need
+the stack, `--keep-phoenix` to keep traces after the run, and `--dry-run` to render the policy
+and prompt without launching.
+
+One-time setup — the OpenShell CLI with a running local gateway, Docker, `gh auth login`, then:
+
+```bash
+scripts/build-weaviate-seed                  # bake the current KB index into a seed image
+openshell provider create --name run-agent-claude --type claude --from-existing
+openshell provider create --name run-agent-github --type github --credential GITHUB_TOKEN
+```
+
+Providers inject credentials into the sandbox as env vars only, never as files. Rebuild the
+seed image after re-indexing the KB.
+
+`main` relies on GitHub branch protection (already enabled on this repo). Git pushes carry
+their ref updates in the request body, so the sandbox policy can allow `git-receive-pack` or
+deny it, but cannot tell "push my branch" from "force-push `main`" — that one is the server's
+call, not the policy's.
+
+### Architecture
+
+Each run gets a **disposable dev environment**: a private Weaviate started from a seed image
+with the KB already indexed (so no re-indexing), a fresh Phoenix, and a metered LLM proxy —
+three sidecar containers on the gateway's Docker network, reachable from the sandbox by
+container name.
+
+Two boundaries do the real work:
+
+- **A sandbox policy** grants exactly what the run needs: push access to this one repository
+  (a push to any other repo, or any other host, is denied by the proxy — regardless of how
+  broad the GitHub token's scopes are), plus the sidecar ports. Grants are per-binary, so the
+  project's own interpreter gets the sidecars, HuggingFace and PyPI, but no route to GitHub at
+  all. Which branch is safe within the repository is GitHub's job, not the policy's.
+- **The metered proxy** holds the real OpenAI/Anthropic keys, so the sandbox only ever sees a
+  per-run token in their place. It enforces a hard call cap from outside the sandbox, which the
+  agent cannot raise; past the cap, calls fail with `429`. Budgets are private to a run: the
+  token is what the sandbox presents as its API key, so a concurrent run sharing the same
+  Docker network cannot spend a neighbour's budget.
+
+Lifecycle is owned by a **detached supervisor**, not the shell you launched from: OpenShell's
+`--no-keep` is enforced client-side, so a killed launcher would otherwise orphan the sandbox.
+The supervisor waits on the run, then deletes the sandbox and its sidecars; `gc` (which also
+runs automatically on every launch) sweeps any run whose supervisor died. Run state lives in
+`runs/agent/<run-id>/`.
+
+The exact grants live in `scripts/run-agent-payload/policy.template.yaml`, rendered per run.
+Design notes, measurements and known gaps: [plans/OPENSHELL.md](plans/OPENSHELL.md).
 
 ## Experimentation surfaces
 

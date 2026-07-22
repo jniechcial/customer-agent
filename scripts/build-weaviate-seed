@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Bake the local Weaviate index into a seed image so sandbox runs start warm.
+#
+#   scripts/build-weaviate-seed
+#
+# Produces `customer-agent/weaviate-kb:<collection>`. The tag is the collection
+# name, so a chunk/embedding config change shows up as a different image and a
+# stale seed is obvious rather than silent.
+#
+# Weaviate must be stopped while its data directory is copied — the LSM store
+# and WAL are not safe to snapshot hot. The container is restarted on exit even
+# if the build fails.
+
+set -euo pipefail
+
+CONTAINER="${WEAVIATE_CONTAINER:-customer-agent-weaviate-1}"
+VOLUME="${WEAVIATE_VOLUME:-customer-agent_weaviate_data}"
+BUILD_DIR="$(mktemp -d)"
+trap 'rm -rf "$BUILD_DIR"' EXIT
+
+log() { printf '\033[36m==>\033[0m %s\n' "$*"; }
+
+docker inspect "$CONTAINER" >/dev/null 2>&1 || {
+    echo "build-weaviate-seed: container '$CONTAINER' not found — start the stack first" >&2
+    exit 1
+}
+
+# Read the collection name and version from the live instance before stopping it.
+# Asked of $CONTAINER itself rather than localhost:8080, so that overriding
+# WEAVIATE_CONTAINER cannot tag one instance's data with another's schema.
+api() { docker exec "$CONTAINER" wget -qO- "http://localhost:8080$1"; }
+
+COLLECTION="${COLLECTION:-$(api /v1/schema \
+    | python3 -c 'import json,sys; cs=json.load(sys.stdin).get("classes",[]); print(cs[0]["class"] if len(cs)==1 else "")')}"
+WEAVIATE_VERSION="$(api /v1/meta | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+
+if [[ -z "$COLLECTION" ]]; then
+    echo "build-weaviate-seed: expected exactly one collection; set COLLECTION= explicitly" >&2
+    exit 1
+fi
+
+# Pin the base image to the version that wrote the data. Weaviate migrates a data
+# directory forward on start, but not backward: with a floating `:latest`, a machine
+# that pulls an older image than the seed was built from meets newer data and fails.
+BASE_IMAGE="${WEAVIATE_IMAGE:-cr.weaviate.io/semitechnologies/weaviate:${WEAVIATE_VERSION}}"
+IMAGE="customer-agent/weaviate-kb:${COLLECTION}"
+log "collection=${COLLECTION} weaviate=${WEAVIATE_VERSION} -> ${IMAGE}"
+
+restart_weaviate() {
+    if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+        log "restarting ${CONTAINER}"
+        docker start "$CONTAINER" >/dev/null
+    fi
+    rm -rf "$BUILD_DIR"
+}
+trap restart_weaviate EXIT
+
+log "stopping ${CONTAINER} for a consistent copy"
+docker stop "$CONTAINER" >/dev/null
+
+log "copying ${VOLUME} into the build context"
+mkdir -p "$BUILD_DIR/seed"
+docker run --rm -v "${VOLUME}:/src:ro" -v "$BUILD_DIR/seed:/dst" alpine \
+    sh -c 'cp -a /src/. /dst/' >/dev/null
+
+cat > "$BUILD_DIR/Dockerfile" <<EOF
+FROM ${BASE_IMAGE}
+LABEL org.customer-agent.collection="${COLLECTION}"
+LABEL org.customer-agent.weaviate-version="${WEAVIATE_VERSION}"
+COPY seed/ /var/lib/weaviate/
+ENV AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true \\
+    PERSISTENCE_DATA_PATH=/var/lib/weaviate \\
+    DEFAULT_VECTORIZER_MODULE=none \\
+    ENABLE_MODULES="" \\
+    CLUSTER_HOSTNAME=node1
+EOF
+
+log "building ${IMAGE}"
+docker build -q -t "$IMAGE" "$BUILD_DIR" >/dev/null
+
+log "done: $(docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' "$IMAGE" | head -1)"
