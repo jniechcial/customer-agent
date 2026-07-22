@@ -16,6 +16,7 @@ from agents import Agent, Runner
 from agents.result import RunResultStreaming
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.padding import Padding
 from rich.text import Text
 
 from customer_agent.tracing import setup_tracing
@@ -90,7 +91,8 @@ def main() -> None:
                     result = Runner.run_sync(agent, turn_input)
             conversation = result.to_input_list()
             console.print()
-            console.print(Markdown(str(result.final_output)))
+            console.print("[bold green]agent>[/bold green]")
+            console.print(Padding(Markdown(str(result.final_output)), (0, 0, 0, 7)))
             console.print()
     finally:
         from customer_agent.retrieval.pipeline import close_pipeline
