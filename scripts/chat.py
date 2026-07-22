@@ -31,12 +31,14 @@ async def run_turn_streamed(agent: Agent, input_items: list, console: Console) -
         item = event.item
         if item.type == "reasoning_item":
             for part in item.raw_item.summary:
-                console.print(Text(f"  · {part.text}", style="dim"))
+                console.print(Text("agent>", style="dim"))
+                console.print(Padding(Text(f"· {part.text}", style="dim"), (0, 0, 0, 7)))
         elif item.type == "tool_call_item":
             call = item.raw_item
             name = getattr(call, "name", type(call).__name__)
             arguments = getattr(call, "arguments", "")
-            console.print(Text(f"  ⚙ {name}({arguments})", style="dim"))
+            console.print(Text("agent>", style="dim"))
+            console.print(Padding(Text(f"⚙ {name}({arguments})", style="dim"), (0, 0, 0, 7)))
     return result
 
 
