@@ -2,12 +2,22 @@
 # by scripts/run-agent before `openshell sandbox create --policy`.
 #
 # Derived from the base image's default policy (`openshell sandbox get <n> --policy-only`),
-# with three changes:
+# with four changes:
 #   1. Agent blocks we do not use are dropped (codex, copilot, cursor, opencode,
 #      nvidia_inference, vscode). The copilot block in particular grants broad
 #      github.com access, which would undermine the single-repo containment below.
 #   2. github_ssh_over_https (fetch-only, any repo) -> github_git (fetch AND push, one repo).
 #   3. github_rest_api (read-only) -> github_api (read-write, one repo, plus GraphQL for gh).
+#   4. The default `pypi` block's GitHub hosts are split into `pypi_installers` and
+#      bound to uv/pip only. Left on the project interpreter they were a hole in (2)
+#      and (3): containment is per-binary, and a general-purpose interpreter with
+#      unrestricted api.github.com is not confined to one repository.
+#
+# Containment is per-binary, so read the `binaries:` list of every block as part of
+# the grant. Two consequences worth knowing: `/usr/bin/node` (needed by Claude Code)
+# has a full route to api.anthropic.com, so the metered proxy's call cap binds the
+# project's Python but not hand-written JS; and git-receive-pack cannot be scoped to
+# a branch, so "do not push to main" is enforced by GitHub branch protection, not here.
 version: 1
 
 filesystem_policy:
@@ -185,12 +195,6 @@ network_policies:
       port: 443
     - host: files.pythonhosted.org
       port: 443
-    - host: github.com
-      port: 443
-    - host: objects.githubusercontent.com
-      port: 443
-    - host: api.github.com
-      port: 443
     - host: downloads.python.org
       port: 443
     binaries:
@@ -202,3 +206,25 @@ network_policies:
     - path: /sandbox/repo/.venv/bin/pip
     - path: /usr/local/bin/uv
     - path: /sandbox/.uv/python/**
+
+  # The installer half of the default policy's `pypi` block, split out and bound
+  # to the installers ONLY. `uv` fetches managed CPython builds from GitHub
+  # releases, so it needs these hosts unrestricted — but the default policy also
+  # granted them to the project's interpreter, which quietly voided the
+  # single-repo containment above: `python -c` could reach api.github.com for any
+  # repository the token allows, bypassing the scoped github_git/github_api rules.
+  # Nothing in this project resolves from GitHub (no git+https deps in uv.lock),
+  # so no installer path is lost by keeping the interpreters out.
+  pypi_installers:
+    name: pypi-installers
+    endpoints:
+    - host: github.com
+      port: 443
+    - host: objects.githubusercontent.com
+      port: 443
+    - host: api.github.com
+      port: 443
+    binaries:
+    - path: /usr/local/bin/uv
+    - path: /sandbox/.venv/bin/pip
+    - path: /sandbox/repo/.venv/bin/pip

@@ -88,6 +88,11 @@ openshell provider create --name run-agent-github --type github --credential GIT
 Providers inject credentials into the sandbox as env vars only, never as files. Rebuild the
 seed image after re-indexing the KB.
 
+`main` relies on GitHub branch protection (already enabled on this repo). Git pushes carry
+their ref updates in the request body, so the sandbox policy can allow `git-receive-pack` or
+deny it, but cannot tell "push my branch" from "force-push `main`" — that one is the server's
+call, not the policy's.
+
 ### Architecture
 
 Each run gets a **disposable dev environment**: a private Weaviate started from a seed image
@@ -99,7 +104,9 @@ Two boundaries do the real work:
 
 - **A sandbox policy** grants exactly what the run needs: push access to this one repository
   (a push to any other repo, or any other host, is denied by the proxy — regardless of how
-  broad the GitHub token's scopes are), plus the sidecar ports.
+  broad the GitHub token's scopes are), plus the sidecar ports. Grants are per-binary, so the
+  project's own interpreter gets the sidecars, HuggingFace and PyPI, but no route to GitHub at
+  all. Which branch is safe within the repository is GitHub's job, not the policy's.
 - **The metered proxy** holds the real OpenAI/Anthropic keys, so the sandbox only ever sees a
   per-run token in their place. It enforces a hard call cap from outside the sandbox, which the
   agent cannot raise; past the cap, calls fail with `429`. Budgets are private to a run: the

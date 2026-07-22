@@ -15,8 +15,8 @@ set -euo pipefail
 
 CONTAINER="${WEAVIATE_CONTAINER:-customer-agent-weaviate-1}"
 VOLUME="${WEAVIATE_VOLUME:-customer-agent_weaviate_data}"
-BASE_IMAGE="${WEAVIATE_IMAGE:-cr.weaviate.io/semitechnologies/weaviate:latest}"
 BUILD_DIR="$(mktemp -d)"
+trap 'rm -rf "$BUILD_DIR"' EXIT
 
 log() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 
@@ -26,15 +26,23 @@ docker inspect "$CONTAINER" >/dev/null 2>&1 || {
 }
 
 # Read the collection name and version from the live instance before stopping it.
-COLLECTION="$(curl -sf localhost:8080/v1/schema \
-    | python3 -c 'import json,sys; cs=json.load(sys.stdin).get("classes",[]); print(cs[0]["class"] if len(cs)==1 else "")')"
-WEAVIATE_VERSION="$(curl -sf localhost:8080/v1/meta | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+# Asked of $CONTAINER itself rather than localhost:8080, so that overriding
+# WEAVIATE_CONTAINER cannot tag one instance's data with another's schema.
+api() { docker exec "$CONTAINER" wget -qO- "http://localhost:8080$1"; }
+
+COLLECTION="${COLLECTION:-$(api /v1/schema \
+    | python3 -c 'import json,sys; cs=json.load(sys.stdin).get("classes",[]); print(cs[0]["class"] if len(cs)==1 else "")')}"
+WEAVIATE_VERSION="$(api /v1/meta | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
 
 if [[ -z "$COLLECTION" ]]; then
     echo "build-weaviate-seed: expected exactly one collection; set COLLECTION= explicitly" >&2
     exit 1
 fi
 
+# Pin the base image to the version that wrote the data. Weaviate migrates a data
+# directory forward on start, but not backward: with a floating `:latest`, a machine
+# that pulls an older image than the seed was built from meets newer data and fails.
+BASE_IMAGE="${WEAVIATE_IMAGE:-cr.weaviate.io/semitechnologies/weaviate:${WEAVIATE_VERSION}}"
 IMAGE="customer-agent/weaviate-kb:${COLLECTION}"
 log "collection=${COLLECTION} weaviate=${WEAVIATE_VERSION} -> ${IMAGE}"
 

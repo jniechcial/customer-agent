@@ -100,6 +100,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _handle(self) -> None:
+        # Read the body up front, even on paths that will refuse the request.
+        # This is HTTP/1.1: the connection is reused, so an unread body would be
+        # parsed as the next request line and the client's following call would
+        # fail as a syntax error instead of seeing our 403/429.
+        length = int(self.headers.get("Content-Length") or 0)
+        payload = self.rfile.read(length) if length else b""
+
         if self.path.rstrip("/") == "/_budget":
             with _lock:
                 self._reply(200, dict(_state))
@@ -180,10 +187,6 @@ class Handler(BaseHTTPRequestHandler):
                 "x-run-agent-permanent": "true",
             })
             return
-
-
-        length = int(self.headers.get("Content-Length") or 0)
-        payload = self.rfile.read(length) if length else b""
 
         headers = {k: v for k, v in self.headers.items() if k.lower() not in STRIP}
         if scheme == "bearer":
